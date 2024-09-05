@@ -1,0 +1,148 @@
+---
+title: "Everglades Time Series"
+format: dashboard
+echo: false
+---
+
+```{r}
+library(wader)
+
+#download_observations(".")
+```
+
+```{r}
+library(dplyr)
+library(tibble)
+library(tidyr)
+
+colony_counts <- tibble(max_counts(level = "colony"))
+subregion_counts <- tibble(max_counts(level = "subregion"))
+region_counts <- tibble(max_counts(level = "region"))
+everglades_counts <- tibble(max_counts(level = "all"))
+water <- tibble(load_datafile("Water/eden_covariates.csv"))
+
+subregion_counts <- subregion_counts |>
+    filter(species %in% c("gbhe", "greg", "rosp", "sneg", "wost", "whib")) |>
+    group_by(region) |>
+    filter(n_distinct(year) > 10) |>
+    complete(year = full_seq(year, 1), species, fill = list(count = 0)) |>
+    ungroup()
+
+ojs_define(col_counts = colony_counts)
+ojs_define(sub_counts = subregion_counts)
+ojs_define(reg_counts = region_counts)
+ojs_define(ever_counts = everglades_counts)
+ojs_define(enviro_data = water)
+
+```
+
+# Max Counts
+
+## {.sidebar}
+
+```{ojs}
+viewof min_year = Inputs.range(
+    [1986, 2024],
+    {step: 1, value: 1986, label: "Min year"})
+viewof max_year = Inputs.range(
+    [1986, 2024],
+    {step: 1, value: 2024, label: "Max year"})
+viewof species = Inputs.checkbox(
+  ["greg", "whib", "rosp", "sneg", "wost", "gbhe"],
+  { value: ["greg", "whib", "rosp", "sneg", "wost", "gbhe"], 
+    label: "Species:"
+  }
+)
+```
+
+```{ojs}
+//| output: false
+data = transpose(sub_counts)
+
+/*
+viewof scale = Inputs.select(
+  ["colony", "subregion", "region", "all"],
+  {value: "subregion", label: "Scale:"}
+)
+*/
+
+filtered = data.filter(function(df) {
+  return df.year >= min_year &&
+         df.year <= max_year &&
+         species.includes(df.species)
+})
+```
+
+## Row
+
+```{ojs}
+Plot.plot({
+    x: {tickFormat: d => d.toString()},
+    marks: [
+        Plot.line(filtered, {
+            x: "year",
+            y: "count", 
+            stroke: "species",
+            fy: "region",
+            marker: true
+            })
+    ],
+    legend: {
+        title: "Species",
+        orient: "top",
+        stroke: "species",
+        symbol: "stroke"
+    }
+})
+```
+
+# Water Data
+
+## {.sidebar}
+
+```{ojs}
+viewof env_min_year = Inputs.range(
+    [1986, 2024],
+    {step: 1, value: 1986, label: "Min year"})
+viewof env_max_year = Inputs.range(
+    [1986, 2024],
+    {step: 1, value: 2024, label: "Max year"})
+viewof env_variable = Inputs.select(
+  ["init_depth", "breed_season_depth", "recession", "pre_recession", "post_recession", "dry_days"],
+  { value: "init_depth", label: "Variables:"}
+)
+viewof region = Inputs.checkbox(
+    env_data.map(d => d.region).filter((value, index, self) => self.indexOf(value) === index),
+    { value: env_data.map(d => d.region).filter((value, index, self) => self.indexOf(value) === index), label: "Region:" }
+)
+```
+
+
+```{ojs}
+//| output: false
+env_data = transpose(enviro_data)
+env_filtered = env_data.filter(function(df) {
+  return df.year >= env_min_year &&
+         df.year <= env_max_year &&
+         region.includes(df.region)
+})
+```
+
+## Row
+
+```{ojs}
+Plot.plot({
+  gird: true,
+  x: {tickFormat: d => d.toString()},
+  marks: [
+    Plot.frame(),
+    Plot.line(env_filtered, {
+      x: "year",
+      y: d => d[env_variable],
+      stroke: "steelblue",
+      fy: "region",
+      marker: true
+      })
+  ]}
+)
+```

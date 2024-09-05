@@ -1,0 +1,71 @@
+---
+title: "mvgam models"
+format: html
+---
+
+```{r}
+library(dplyr)
+library(mvgam)
+library(tibble)
+library(tidyr)
+library(wader)
+```
+
+## Everglades wide
+
+### Data
+
+```{r}
+everglades_counts <- tibble(max_counts(level = "all"))
+everglades_counts <- everglades_counts |>
+    filter(species %in% c("gbhe", "greg", "rosp", "sneg", "wost", "whib")) |>
+    complete(year = full_seq(year, 1), species, fill = list(count = 0)) |>
+    ungroup()
+
+water <- load_datafile("Water/eden_covariates.csv")
+everglades_water <- filter(water, region == "all") |>
+    filter(year < 2024) # 2024 data for birds not yet available
+count_env_data <- everglades_counts |>
+    filter(year >= 1991) |> # No water data prior to 1991
+    full_join(everglades_water, by = "year") |>
+    mutate(time = year - min(year) + 1, series = factor(species))
+
+data_train <- filter(count_env_data, year < 2018)
+data_test <- filter(count_env_data, year >= 2018)
+```
+
+### Model
+
+```{r}
+plot_mvgam_series(data = data_train, y = "count", series = "all")
+```
+
+
+```{r}
+priors <- get_mvgam_priors(
+  formula = count ~ 1,
+  trend_formula = ~ s(breed_season_depth, trend, bs = "re"),
+  trend_model = "VAR1",
+  family = nb(),
+  data = data_train
+)
+
+priors <- prior(beta(10, 10), class = sigma, lb = 0.2, ub = 1)
+priors <- c(priors, prior(normal(0, 0.001), class = Intercept))
+
+gam_ar1 = mvgam(
+  formula = count ~ 1,
+  trend_formula = ~ s(breed_season_depth, trend, bs = "re") +
+                    s(dry_days, trend, bs = "re") +
+                    s(recession, trend, bs = "re"),
+  trend_model = "VAR1",
+  family = nb(),
+  data = data_train,
+  newdata = data_test,
+  chains = 2
+)
+```
+
+```{r}
+plot(gam_ar1, type = "forecast", series = 6)
+```
