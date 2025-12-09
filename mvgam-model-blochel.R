@@ -186,6 +186,7 @@ length(in_interval_all[in_interval_all == 1]) / length(in_interval_all)
 plot(forecast_all)
 
 #region
+baseline_model_region <- gam_region 
 summary(baseline_model_region, include_betas = FALSE)
 mcmc_plot(baseline_model_region, 
           type = 'trace')
@@ -254,8 +255,7 @@ gam_region = mvgam(
     s(pre_recession , trend, bs = "re") +
     #s(post_recession , trend, bs = "re") +
     te(reversals , year, bs = c("re","cc")) +
-    te(dry_days , year, bs = c("re","cc"))+
-    species,
+    te(dry_days , year, bs = c("re","cc")),
   # trend_model = AR(),     trend_model = AR(p = 1),
   family = nb(),
   data = data_train_region,
@@ -263,6 +263,9 @@ gam_region = mvgam(
   newdata = data_test_region,
   chains = 4
 ) 
+
+plot(gam_region, type = "forecast", series = 1)     
+plot(gam_region, type = "forecast", series = 2)  
 
 
 
