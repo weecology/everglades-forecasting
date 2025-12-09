@@ -3,3 +3,8 @@ EvergladesWadingBird/
 *_files/
 /.quarto/
 WaterData/
+.Rproj.user
+time-series.html
+WOST_initiation
+EvergladesForecasting.html
+.Rhistory
