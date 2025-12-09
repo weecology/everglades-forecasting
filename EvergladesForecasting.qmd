@@ -73,17 +73,21 @@ ggsave("results/region-timeseries.png", height = 26, width = 26)
 
 ### Load covariates
 ```{r}
-# water <- load_datafile("eden_covariates.csv")
-eden_path <- "../water"
-water <- get_eden_covariates(eden_path=eden_path) |>
-    bind_rows(get_eden_covariates(eden_path=eden_path, level="all")) |>
-    bind_rows(get_eden_covariates(eden_path=eden_path, level="wcas")) |>
-    select(year, region=Name, variable, value) |>
-    as.data.frame() |>
-    select(-geometry) |>
-    pivot_wider(names_from="variable", values_from="value") |>
-    mutate(year = as.integer(year)) |>
-    arrange("year", "region")
+water <- read.csv("eden_covariates.csv")
+#eden_path <- "/alex_data/everglades-forecasting-blochel/everglades-forecasting-blochel/WaterData"                                            
+# water <- get_eden_covariates(eden_path=eden_path) |>
+#     bind_rows(get_eden_covariates(eden_path=eden_path, level="all")) |>
+#     bind_rows(get_eden_covariates(eden_path=eden_path, level="wcas")) |>
+#     select(year, region=Name, variable, value) |>
+#     as.data.frame() |>
+#     select(-geometry) |>
+#     pivot_wider(names_from="variable", values_from="value") |>
+#     mutate(year = as.integer(year)) |>
+#     arrange("year", "region")
+
+#  2025_xx_deoth.nc not working - removed 
+
+
 region_water <- filter(water, region %in% c(unique(region_counts$region))) |>
     filter(year < 2024) # 2024 data for birds not yet available
 count_env_data <- region_counts |>

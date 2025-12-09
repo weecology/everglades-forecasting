@@ -7,6 +7,7 @@ echo: false
 ```{r}
 library(wader)
 
+
 #download_observations(".")
 ```
 
@@ -19,7 +20,9 @@ colony_counts <- tibble(max_counts(level = "colony"))
 subregion_counts <- tibble(max_counts(level = "subregion"))
 region_counts <- tibble(max_counts(level = "region"))
 everglades_counts <- tibble(max_counts(level = "all"))
-water <- tibble(load_datafile("Water/eden_covariates.csv"))
+water <- load_datafile("eden_covariates.csv",              
+                       path = getwd()) |>                  #have .renviron so i needed to specify: 
+  tibble()                                                 #WADER_DATA_PATH="C:/alex_data/everglades-forecasting-blochel/"
 
 subregion_counts <- subregion_counts |>
     filter(species %in% c("gbhe", "greg", "rosp", "sneg", "wost", "whib")) |>

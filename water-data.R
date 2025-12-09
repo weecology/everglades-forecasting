@@ -7,12 +7,17 @@ library(sf)
 library(wader)
 
 eden_path <- "WaterData"
-download_eden_depths(eden_path)
+#download_eden_depths(eden_path)
 
 eden_data_files <- list.files(file.path(eden_path), pattern = "_depth.nc", full.names = TRUE)
-boundaries <- load_boundaries(level = "subregions")
+boundaries <- load_boundaries(level = "subregions")                                                             ### this is not working... 
 examp_eden_file <- stars::read_stars(file.path(eden_data_files[1]))
 boundaries_utm <- sf::st_transform(boundaries, sf::st_crs(examp_eden_file))
+
+terra::rast(file.path(eden_data_files[1]))
+
+
+# T:\lab-white-ernest\EDENBackup
 
 # Modified from EvergladesWadingBird DataCleaningScripts/eden_covariates.R
 # year <- 2022
@@ -59,5 +64,7 @@ for (region in regions) {
     all_years_data[[as.character(year)]] <- average_depths
   }
   all_years_data <- dplyr::bind_rows(all_years_data)
-  write_csv(all_years_data, glue::glue("{region}_depth_data.csv"))
+  write_csv(all_years_data, glue::glue("{region}_depth_data.csv"))                                      ### regions not workig 
 }
+
+

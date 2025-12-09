@@ -13,8 +13,7 @@ library(tsibble)
 library(urca)
 library(wader)
 
-water <- load_datafile("Water/eden_covariates.csv", download_if_missing = TRUE) |>
-  filter(region == "inlandenp") |>
+water <- load_datafile("eden_covariates.csv") |> 
   filter(year < 2024) # No 2024 bird data yet
 
 depth_data <- read_csv("3as_depth_data.csv") |>

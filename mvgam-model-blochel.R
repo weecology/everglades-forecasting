@@ -262,7 +262,7 @@ gam_region = mvgam(
   burnin = 2000, 
   newdata = data_test_region,
   chains = 4
-)
+) 
 
 
 
