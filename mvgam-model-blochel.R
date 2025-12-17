@@ -4,6 +4,7 @@
 
 library(dplyr)
 library(mvgam)
+library(parallel)
 library(stringr)
 library(tibble)
 library(tidyr)
@@ -269,7 +270,8 @@ plot(gam_all1, type = "forecast", series = 6)
 
 gam_all2 = mvgam(
   count ~ s(init_depth) + s(breed_season_depth) + s(recession) + 
-    s(pre_recession) + s(post_recession) + s(dry_days) + s(reversals)+ series,,
+    s(pre_recession) + s(post_recession) + s(dry_days) + s(reversals) +
+    s(recession, series, bs = 'sz') + series,
   family = nb(),
   data = data_train_all,
   burnin = 2000, 
@@ -291,6 +293,33 @@ plot(gam_all2, type = "forecast", series = 5)
 plot(gam_all2, type = "forecast", series = 6)  
 
 
+
+
+
+gam_all3 = mvgam(
+  count ~ s(init_depth) + s(breed_season_depth) + s(recession) + 
+    s(pre_recession) + s(post_recession) + s(dry_days) + s(reversals) +
+    s(recession, series, bs = 'sz') + series -1,
+  family = nb(),
+  data = data_train_all,
+  terd_model = AR(p = 1),
+  burnin = 2000, 
+  newdata = data_test_all,
+  chains = 4
+) 
+
+summary(gam_all3)
+mcmc_plot(gam_all3, 
+          type = 'trace')
+
+plot(gam_all3, type = 'residuals')
+
+plot(gam_all3, type = "forecast", series = 1)     
+plot(gam_all3, type = "forecast", series = 2)  
+plot(gam_all3, type = "forecast", series = 3)     
+plot(gam_all3, type = "forecast", series = 4)  
+plot(gam_all3, type = "forecast", series = 5)     
+plot(gam_all3, type = "forecast", series = 6)  
 
 
 # subregion ---------------------------------------------------------------
@@ -355,17 +384,18 @@ plot(gam_region1, type = "forecast", series = 36)
 
 
 
-
+#https://www.mjandrews.org/notes/rparallel/
 
 gam_region2 = mvgam(
   count ~ s(recession) + 
-    series +
-    s(recession, series, bs = 'sz'),
+    series,
   family = nb(),
   data = data_train_region,
   burnin = 2000, 
   newdata = data_test_region,
   chains = 4,
+  parallel = TRUE, 
+  threads = 1, 
   backend = 'cmdstanr'
 ) 
 
@@ -379,27 +409,25 @@ plot(gam_region2, type = "forecast")
 code(gam_region2) #see stan code 
 
 
-
-
 #  Piecewise trends - doesnt work 
-gam_region_piece = mvgam(
-  count ~ init_depth + recession + dry_days + reversals - 1, #remove intercept
-  family = nb(),
-  trend_model = PW(),
-  data = data_train_region,
-  burnin = 2000, 
-  newdata = data_test_region,
-  chains = 4
-) 
-
-summary(gam_region_piece)
-mcmc_plot(gam_region_piece, 
-          type = 'trace')
-
-
-plot(gam_region_piece, type = "trend", series = 5)
-
-plot(gam_region_piece, type = "forecast", series = 5)
+# gam_region_piece = mvgam(
+#   count ~ init_depth + recession + dry_days + reversals - 1, #remove intercept
+#   family = nb(),
+#   trend_model = PW(),
+#   data = data_train_region,
+#   burnin = 2000, 
+#   newdata = data_test_region,
+#   chains = 4
+# ) 
+# 
+# summary(gam_region_piece)
+# mcmc_plot(gam_region_piece, 
+#           type = 'trace')
+# 
+# 
+# plot(gam_region_piece, type = "trend", series = 5)
+# 
+# plot(gam_region_piece, type = "forecast", series = 5)
 
 
 
