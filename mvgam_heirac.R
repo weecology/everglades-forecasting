@@ -145,15 +145,15 @@ plot_mvgam_series(data = data_train_all,
                   y = 'count',
                   series = 4)
 
-# plot_mvgam_series(data = data_train_all,
-#                   newdata = data_test_all,
-#                   y = 'count',
-#                   series = 5)
+plot_mvgam_series(data = data_train_all,
+                  newdata = data_test_all,
+                  y = 'count',
+                  series = 5)
 
-# plot_mvgam_series(data = data_train_all,
-#                   newdata = data_test_all,
-#                   y = 'count',
-#                   series = 6)
+plot_mvgam_series(data = data_train_all,
+                  newdata = data_test_all,
+                  y = 'count',
+                  series = 6)
 
 
 
@@ -207,7 +207,7 @@ def_priors <- get_mvgam_priors(
 )
 View(def_priors)
 
-# sigma_prior <- prior(beta(10, 10), class = sigma, lb = 0.2, ub = 1)
+sigma_prior <- prior(beta(10, 10), class = sigma, lb = 0.2, ub = 1)
 
 intercept_prior <- prior(normal(0, 0.001), class = Intercept)
 
@@ -226,45 +226,56 @@ mod1 <- mvgam(
   
   # Process model that contains the hierarchical temporal smooths
   trend_formula = ~
-    0 + 
+    #0 + 
 
-    s(init_depth) +
-    s(dry_days) +
+    # Shared smooth of x for all series
+    s(init_depth, 
+      k = 30, 
+      bs = 'cr') +
+    
+    # Shared smooth of x for all series
+    s(dry_days, 
+      k = 30, 
+      bs = 'cr') +
+    
+    # Deviation smooths for each series
+    s(dry_days,
+      trend,
+      k = 15,
+      bs = 'sz',
+      xt = list(bs = 'cr'))+
     
     # Shared smooth of x for all series
     s(breed_season_depth, 
       k = 30, 
       bs = 'cr') +
-    
-    # Deviation smooths for each series
-    s(breed_season_depth, 
-      trend, 
-      k = 15, 
-      bs = 'sz', 
-      xt = list(bs = 'cr'))+
-  
+   # 
+   # # Deviation smooths for each series
+   #  s(breed_season_depth,
+   #    trend,
+   #    k = 15,
+   #    bs = 'sz',
+   #    xt = list(bs = 'cr'))+
+   # 
   
     # Shared smooth of x for all series
     s(recession, 
       k = 30, 
-      bs = 'cr') #+
+      bs = 'cr') +
 
-    # # Deviation smooths for each series
-    # s(recession,                                       #removing this makes R_hat larger
-    #   trend,
-    #   k = 15,
-    #   bs = 'sz',
-    #   xt = list(bs = 'cr'))
+     # Deviation smooths for each series
+     s(recession,                                       #removing this makes R_hat larger
+       trend,
+       k = 15,
+       bs = 'sz',
+       xt = list(bs = 'cr'))
     ,
   
-  trend_model = RW(),
+  trend_model = VAR(),
   
   # Updated prior distributions for the series-level 
   # intercepts using brms::prior()
-  priors = ar_sp_intercept_prior,
-    
-    # prior(std_normal(),
-    #              class = b),
+  priors = sigma_prior,
  
   # Training and testing data in mvgam's long format
   data = data_train_all,
@@ -279,13 +290,38 @@ mod1 <- mvgam(
   # variance components, dispersion parameters), 
   # these will be shared across all outcome variables. 
   # Useful when multiple outcomes share properties. 
-  share_obs_params = FALSE,
+  share_obs_params = TRUE,
   
   # Non-centring the latent states tends to improve
   # performance in State Space models
   noncentred = TRUE,
   backend = 'cmdstanr'
 )
+
+
+
+
+# subgr	
+# A subgrouping factor variable specifying which element 
+# in data represents the different time series. Defaults 
+# to series, but note that models that use the hierarchical 
+# correlations, where the subgr time series are measured in 
+# each level of gr, should not include a series element in 
+# data. Rather, this element will be created internally 
+# based on the supplied variables for gr and subgr.
+# 
+# For example, if you are modelling temporal counts for a 
+# group of species (labelled as species in data) across 
+# three different geographical regions (labelled as region), 
+# and you would like the residuals to be correlated within 
+# regions, then you should specify gr = region and 
+# subgr = species. Internally, mvgam() will create the 
+# series element for the data using:
+#   series = interaction(group, subgroup, drop = TRUE)
+
+
+#zero inflated NB - needed? - probably if we look at the regions 
+
 
 
 
@@ -315,6 +351,15 @@ mcmc_plot(mod1,
           variable = 'sigma',
           regex = TRUE,
           type = 'trace')
+
+
+mcmc_plot(mod1, variable = 'delta_trend', regex = TRUE) +
+  scale_y_discrete(labels = mod$trend_model$changepoints) +
+  labs(
+    y = 'Potential changepoint',
+    x = 'Rate change'
+  )
+
 
 # Draw the individual component smooths
 gratia::draw(mod1, trend_effects = TRUE)
@@ -366,6 +411,7 @@ plot_predictions(mod1,
                  by = c('time', 'series', 'series'),
                  points = 0.5) +
   geom_vline(xintercept = max(data_train_all$time),
-             linetype = 'dashed')+
+             linetype = 'dashed') +
   geom_point(aes(x = time, y = count), 
-             data = data_test_all)
+             data = data_test_all) #+
+  #scale_y_continuous(trans='log10')

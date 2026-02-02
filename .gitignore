@@ -8,3 +8,5 @@ time-series.html
 WOST_initiation
 EvergladesForecasting.html
 .Rhistory
+
+**/*.quarto_ipynb
