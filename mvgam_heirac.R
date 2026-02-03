@@ -226,52 +226,45 @@ mod1 <- mvgam(
   
   # Process model that contains the hierarchical temporal smooths
   trend_formula = ~
-    #0 + 
+    0 + 
 
     # Shared smooth of x for all series
     s(init_depth, 
-      k = 30, 
       bs = 'cr') +
     
     # Shared smooth of x for all series
     s(dry_days, 
-      k = 30, 
       bs = 'cr') +
     
     # Deviation smooths for each series
     s(dry_days,
       trend,
-      k = 15,
       bs = 'sz',
       xt = list(bs = 'cr'))+
     
     # Shared smooth of x for all series
     s(breed_season_depth, 
-      k = 30, 
       bs = 'cr') +
    # 
    # # Deviation smooths for each series
-   #  s(breed_season_depth,
-   #    trend,
-   #    k = 15,
-   #    bs = 'sz',
-   #    xt = list(bs = 'cr'))+
-   # 
+    s(breed_season_depth,
+      trend,
+      bs = 'sz',
+      xt = list(bs = 'cr'))+
+
   
     # Shared smooth of x for all series
     s(recession, 
-      k = 30, 
       bs = 'cr') +
 
      # Deviation smooths for each series
      s(recession,                                       #removing this makes R_hat larger
        trend,
-       k = 15,
        bs = 'sz',
        xt = list(bs = 'cr'))
     ,
   
-  trend_model = VAR(),
+  trend_model = ZMVN(),
   
   # Updated prior distributions for the series-level 
   # intercepts using brms::prior()
@@ -413,5 +406,5 @@ plot_predictions(mod1,
   geom_vline(xintercept = max(data_train_all$time),
              linetype = 'dashed') +
   geom_point(aes(x = time, y = count), 
-             data = data_test_all) #+
-  #scale_y_continuous(trans='log10')
+             data = data_test_all) +
+  scale_y_continuous(trans='log10')

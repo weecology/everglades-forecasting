@@ -854,7 +854,7 @@ plot_mvgam_series(data = data_train, y = "count", series = "all")
 
 priors <- get_mvgam_priors(
   formula = count ~ 1,
-  trend_formula = ~ s(pre_recession, trend, bs = "re"),
+  trend_formula = ~ s(dry_days, trend, bs = "re"),
   trend_model = "VAR1",
   family = nb(),
   data = data_train
