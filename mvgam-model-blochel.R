@@ -821,7 +821,7 @@ score(ensemble_fc)
 
 
 
-# from Ethan 2024 ---------------------------------------------------------
+# simpler model ---------------------------------------------------------
 
 
 library(dplyr)
@@ -855,7 +855,7 @@ plot_mvgam_series(data = data_train, y = "count", series = "all")
 priors <- get_mvgam_priors(
   formula = count ~ 1,
   trend_formula = ~ s(dry_days, trend, bs = "re"),
-  trend_model = "VAR1",
+  trend_model = VAR(),
   family = nb(),
   data = data_train
 )
@@ -868,15 +868,36 @@ gam_ar1 = mvgam(
   trend_formula = ~ te(init_depth, recession) +
     s(dry_days, trend, bs = "re") +
     s(recession, trend, bs = "re"),
-  trend_model = "VAR1",
+  trend_model = VAR(),
   family = nb(),
   data = data_train,
   newdata = data_test,
-  priors = priors,
+  priors = priors_test,
   chains = 2
 )
 
-
+summary(gam_ar1,
+        include_betas = FALSE,
+        smooth_test = FALSE)
+mcmc_plot(gam_ar1,
+          type = 'rhat_hist')
+mcmc_plot(gam_ar1,
+          variable = 'obs_params',
+          type = 'trace')
+mcmc_plot(gam_ar1,
+          variable = 'sigma',
+          regex = TRUE,
+          type = 'trace')
 
 plot(gam_ar1, type = "forecast", series = 1)
+
+
+plot_predictions(gam_ar1, 
+                 newdata = count_env_data,
+                 by = c('time', 'series', 'series'),
+                 points = 0.5) +
+  geom_vline(xintercept = max(data_train$time),
+             linetype = 'dashed') +
+  geom_point(aes(x = time, y = count), 
+             data = data_test) 
 
