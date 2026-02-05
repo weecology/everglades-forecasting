@@ -226,7 +226,7 @@ mod1 <- mvgam(
   
   # Process model that contains the hierarchical temporal smooths
   trend_formula = ~
-    0 + 
+    0 + #think adding 0+ makes it hierarchical. not sure
 
     # Shared smooth of x for all series
     s(init_depth, 
@@ -264,7 +264,9 @@ mod1 <- mvgam(
        xt = list(bs = 'cr'))
     ,
   
-  trend_model = ZMVN(),
+  trend_model = VAR(), 
+
+  
   
   # Updated prior distributions for the series-level 
   # intercepts using brms::prior()
@@ -347,7 +349,7 @@ mcmc_plot(mod1,
 
 
 mcmc_plot(mod1, variable = 'delta_trend', regex = TRUE) +
-  scale_y_discrete(labels = mod$trend_model$changepoints) +
+  scale_y_discrete(labels = mod1$trend_model$autoregressive_coef) +
   labs(
     y = 'Potential changepoint',
     x = 'Rate change'
@@ -406,5 +408,25 @@ plot_predictions(mod1,
   geom_vline(xintercept = max(data_train_all$time),
              linetype = 'dashed') +
   geom_point(aes(x = time, y = count), 
-             data = data_test_all) +
-  scale_y_continuous(trans='log10')
+             data = data_test_all)
+
+plot(mod1, type = "forecast", series = 1)
+plot(mod1, type = "forecast", series = 2)
+plot(mod1, type = "forecast", series = 3)
+plot(mod1, type = "forecast", series = 4)
+plot(mod1, type = "forecast", series = 5)
+plot(mod1, type = "forecast", series = 6)
+
+
+# Dynamic trend extrapolations
+fc <- forecast(
+  mod1,
+  type = 'trend' #“link”, “response”, “trend”, “expected”, “detection”, “latent_N”
+)
+plot(fc, series = 1)
+plot(fc, series = 2)
+plot(fc, series = 3)
+plot(fc, series = 4)
+plot(fc, series = 5)
+plot(fc, series = 6)
+

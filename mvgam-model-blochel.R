@@ -37,15 +37,15 @@
 
 # MVGAM wading birds  ------------------------------------------------------
 
-
-library(dplyr)
-library(mvgam)
-library(parallel)
-library(stringr)
-library(tibble)
-library(tidymodels)
-library(tidyr)
-library(wader)
+library('bayesplot')
+library('dplyr')
+library('mvgam')
+library('parallel')
+library('stringr')
+library('tibble')
+library('tidymodels')
+library('tidyr')
+library('wader')
 
 
 
@@ -59,15 +59,14 @@ everglades_region <- tibble(max_counts(level = "subregion"))
 everglades_counts_region <- everglades_region |>
   filter(species %in% c("gbhe", "greg", "rosp", "sneg", "wost", "whib")) |>
   mutate(bird_region = paste(species, region,sep = '-')) |>             # series = species and region! 
-  complete(year = full_seq(year, 1), bird_region, fill = list(count = 0)) |>
-  ungroup() |> 
-  mutate(region = if_else(is.na(region), 
-                          word(bird_region, 2, sep = fixed('-')), 
-                          region), 
-         species = if_else(is.na(species),
-                           word(bird_region, 1, sep = fixed('-')), 
-                           species)) |> 
-  filter(region != '3an' & region != '2a')
+   complete(year = full_seq(year, 1), bird_region, fill = list(count = 0)) #|>
+  # ungroup() |> 
+  # mutate(region = if_else(is.na(region), 
+  #                         word(bird_region, 2, sep = fixed('-')), 
+  #                         region), 
+  #        species = if_else(is.na(species),
+  #                          word(bird_region, 1, sep = fixed('-')), 
+  #                          species)) 
 
 
 
@@ -860,39 +859,53 @@ priors <- get_mvgam_priors(
   data = data_train
 )
 
-#priors <- prior(beta(10, 10), class = sigma, lb = 0.2, ub = 1)
+priors <- prior(beta(10, 10), class = sigma, lb = 0.2, ub = 1)
 priors_test <- c(priors, prior(normal(0, 0.001), class = Intercept))
 
-gam_ar1 = mvgam(
+gam_var1 = mvgam(
   formula = count ~ 1,
-  trend_formula = ~ te(init_depth, recession) +
+  trend_formula = ~ s(init_depth) + s(recession) +
     s(dry_days, trend, bs = "re") +
     s(recession, trend, bs = "re"),
   trend_model = VAR(),
   family = nb(),
   data = data_train,
   newdata = data_test,
-  priors = priors_test,
-  chains = 2
+  # Non-centring the latent states tends to improve
+  # performance in State Space models
+  noncentred = TRUE,
+  backend = 'cmdstanr',
+  chains = 2,
+  burnin = 1000
 )
 
-summary(gam_ar1,
+#simulate data
+#run models and see predictions 
+#sim_mvgam 
+
+
+summary(gam_var1)
+summary(gam_var1,
         include_betas = FALSE,
         smooth_test = FALSE)
-mcmc_plot(gam_ar1,
+mcmc_plot(gam_var1,
           type = 'rhat_hist')
-mcmc_plot(gam_ar1,
+mcmc_plot(gam_var1,
           variable = 'obs_params',
           type = 'trace')
-mcmc_plot(gam_ar1,
+mcmc_plot(gam_var1,
           variable = 'sigma',
           regex = TRUE,
           type = 'trace')
 
-plot(gam_ar1, type = "forecast", series = 1)
+plot(gam_var1, type = "forecast", series = 1)
+plot(gam_var1, type = "forecast", series = 2)
+plot(gam_var1, type = "forecast", series = 3)
+plot(gam_var1, type = "forecast", series = 4)
+plot(gam_var1, type = "forecast", series = 5)
+plot(gam_var1, type = "forecast", series = 6)
 
-
-plot_predictions(gam_ar1, 
+plot_predictions(gam_var1, 
                  newdata = count_env_data,
                  by = c('time', 'series', 'series'),
                  points = 0.5) +
