@@ -3,7 +3,8 @@
 
 library('deSolve')
 library('ggplot2')
-
+library('sicegar')
+library('stats')
 
 
 
@@ -62,8 +63,70 @@ water_year |>
 
 
 
-# Lotka Volterra - model --------------------------------------------------
 
+
+# fish catch  -------------------------------------------------------------
+
+
+
+depth <- water_year$water_depth
+
+background_bird_take <- 1
+background_fish_take <- 1
+
+
+#simulate intensity data and add noise
+noise_parameter <- 0
+intensity_noise <- stats::runif(n = length(depth), min = 0, max = 1) * noise_parameter
+
+intensity_b <- sigmoidalFitFormula_h0(depth, 
+                                    maximum = 100, 
+                                    slopeParam = -0.3, 
+                                    midPoint = 30, 
+                                    h0 = background_bird_take)
+
+intensity_bird <- intensity_b + intensity_noise
+
+
+intensity_f <- sigmoidalFitFormula_h0(depth, 
+                                      maximum = 100, 
+                                      slopeParam = 0.5, 
+                                      midPoint = 20, 
+                                      h0 = background_fish_take)
+
+intensity_fish <- intensity_f + intensity_noise
+
+dataInput <- data.frame(intensity_bird = intensity_bird, 
+                        intensity_fish = intensity_fish, 
+                        depth_cm = depth)
+  
+
+ggplot(dataInput) +
+  geom_vline(xintercept = 10 ) +
+  geom_line(aes(x = depth_cm, y = intensity_bird), 
+            color = 'blue', linewidth = 2) +
+  geom_line(aes(x = depth_cm, y = intensity_fish), 
+            color = 'red', linewidth = 2) +
+  expand_limits(x = 0, y = 0) + 
+  theme_bw() +
+  theme(text = element_text(size = 20)) +
+  ylab('Foraging Pressure \n on Prey Base Fish (%)') +
+  xlab('Depth (cm)') +
+  geom_text(x=70, y=98, size = 5, color = 'red',
+            label = 'Piscivorous Fish') +
+  geom_text(x=70, y=3, size = 5, color = 'blue',
+            label = 'Wading Birds')
+
+
+
+
+
+
+
+
+
+# Lotka Volterra - model --------------------------------------------------
+#from: https://www.rpubs.com/Jeet1994/Prey-predator-model
 
 
 
@@ -81,8 +144,32 @@ Time <- seq(0, 100, by = 1)
 
 out <- as.data.frame(ode(func = LotVmod, y = State, parms = Pars, times = Time))
 
-matplot(out[,-1], type = "l", xlab = "time", ylab = "population")
-legend("topright", c("Cute bunnies", "Rabid foxes"), lty = c(1,2), col = c(1,2), box.lwd = 0)
+# matplot(out[,-1], type = "l", xlab = "time", ylab = "population")
+# legend("topright", c("Cute bunnies", "Rabid foxes"), lty = c(1,2), col = c(1,2), box.lwd = 0)
+
+
+PrPred <- function(a,b,g,d){
+  library(deSolve)
+  
+  Pars <- c(a, b, g, d)
+  State <- c(x = 10, y = 10)
+  
+  
+  LotVmod <- function (Time, State, Pars) {
+    with(as.list(c(State, Pars)), {
+      dx = x*(a - b*y)
+      dy = -y*(g - d*x)
+      return(list(c(dx, dy)))
+    })
+  }
+  
+  Time <- seq(0, 100, by = 1)
+  out <- as.data.frame(ode(func = LotVmod, y = State, parms = Pars, times = Time))
+  
+  matplot(out[,-1], type = "l", xlab = "time", ylab = "population")
+  legend("topright", c("Prey", "Predator"), lty = c(1,2), col = c(1,2), box.lwd = 0)
+  
+}
 
 
 
