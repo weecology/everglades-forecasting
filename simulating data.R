@@ -47,16 +47,14 @@ water_year |>
                'Mean annual depth = ', mean_depth,'\n', 
                'Amplitude of cos = ', amplitude,'\n', 
                'Max waterlevel day = ', maxday,'\n', 
-               'Generated numbers sd = ', sd,
-               sep = ''
+               'Generated numbers sd = ', sd
              ))+ 
-  geom_text(x=350, y=15, size = 5, 
+  geom_text(x=350, y=11, size = 5, color = 'blue',
             label = paste(
-              'Dry Days \n', 
+              'Dry Days: ', 
               water_year |> 
                 filter(water_depth <= 10) |> 
-                nrow(),
-              sep = ' '
+                nrow()
             ))+ 
   theme(text = element_text(size = 20)) 
 
