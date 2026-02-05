@@ -44,7 +44,7 @@ water_year |>
   geom_hline(yintercept = 10, 
              color = 'blue') +
   theme_bw() +
-  geom_text(x=330, y=55, size = 5, 
+  geom_text(x=310, y=75, size = 4, 
              label = paste(
                'Mean annual depth = ', mean_depth,'\n', 
                'Amplitude of cos = ', amplitude,'\n', 
@@ -71,7 +71,7 @@ water_year |>
 
 depth <- water_year$water_depth
 
-background_bird_take <- 1
+background_bird_take <- 5
 background_fish_take <- 1
 
 
@@ -89,7 +89,7 @@ intensity_bird <- intensity_b + intensity_noise
 
 
 intensity_f <- sigmoidalFitFormula_h0(depth, 
-                                      maximum = 100, 
+                                      maximum = 95, 
                                       slopeParam = 0.5, 
                                       midPoint = 20, 
                                       h0 = background_fish_take)
@@ -102,7 +102,9 @@ dataInput <- data.frame(intensity_bird = intensity_bird,
   
 
 ggplot(dataInput) +
-  geom_vline(xintercept = 10 ) +
+  geom_vline(xintercept = 10, 
+             size = 1.5, 
+             color = 'grey') +
   geom_line(aes(x = depth_cm, y = intensity_bird), 
             color = 'blue', linewidth = 2) +
   geom_line(aes(x = depth_cm, y = intensity_fish), 
