@@ -192,6 +192,26 @@ PrPred(3, 0.5, 2, 2)
 
 
 
+# migration  --------------------------------------------------------------
+
+
+#Cagnacci et al. 2014, Berg et al. 2019 Partial migration 
+
+#migrants vs residents 
+#summer vs winter range 
+# sympatric winter range
+# switching among tactics 
+
+
+#dynamic forage model, water dynamics and pred prey interactions 
+# wetness? 
+
+
+
+
+
+
+
 
 
 
