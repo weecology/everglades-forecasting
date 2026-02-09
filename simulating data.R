@@ -15,9 +15,10 @@ mean_depth = 40
 amplitude = 40
 maxday = 150
 sd = 0
+years = 2 
 
 water_year <- data.frame(day = integer(), water_depth = numeric())
-days = 1:365
+days = 1:(365*years)
 
 
 
@@ -28,8 +29,8 @@ for (i in seq_along(days)) {
   water_year[i, ] <- c(days[i],
                        rnorm(
                          days[i], 
-                         mean = mean_depth + amplitude *
-                           cos(2 * pi * ((days[i] - maxday) / 365)),
+                         mean = mean_depth + (amplitude  *
+                            cos(2 * pi * ((days[i] - maxday) / 365))),
                          sd = sd))
 }
 
@@ -43,22 +44,27 @@ water_year |>
              color = 'red') + 
   geom_hline(yintercept = 10, 
              color = 'blue') +
+  geom_hline(yintercept = 5, 
+             color = 'grey') +
   theme_bw() +
-  geom_text(x=310, y=75, size = 4, 
+  geom_text(x = (365*years), y=75, size = 4, 
              label = paste(
                'Mean annual depth = ', mean_depth,'\n', 
                'Amplitude of cos = ', amplitude,'\n', 
                'Max waterlevel day = ', maxday,'\n', 
                'Generated numbers sd = ', sd
              ))+ 
-  geom_text(x=350, y=11, size = 5, color = 'blue',
+  geom_text(x = (365*years),  y=11, size = 5, color = 'blue',
             label = paste(
               'Dry Days: ', 
               water_year |> 
                 filter(water_depth <= 10) |> 
                 nrow()
-            ))+ 
-  theme(text = element_text(size = 20)) 
+            )) +
+  coord_cartesian(xlim = c(0, (365*years)), # This focuses the x-axis on the range of interest
+                  clip = 'off') +   # This keeps the labels from disappearing
+  theme(text = element_text(size = 20), 
+        plot.margin = unit(c(1,7,1,1), "lines")) 
 
 
 
@@ -67,7 +73,10 @@ water_year |>
 
 # fish catch  -------------------------------------------------------------
 
-
+# include this in large fish line:
+# water_year |> 
+#   filter(water_depth <= 10) |> 
+#   nrow()
 
 depth <- water_year$water_depth
 
@@ -124,6 +133,9 @@ ggplot(dataInput) +
 
 
 
+# Dry Days ----------------------------------------------------------------
+
+
 
 
 
@@ -172,6 +184,20 @@ PrPred <- function(a,b,g,d){
   legend("topright", c("Prey", "Predator"), lty = c(1,2), col = c(1,2), box.lwd = 0)
   
 }
+
+# α - The growth rate of Prey,
+# dependent on high or low water levels - birds and large fish 
+
+# β - Rate at which Predators destroy Prey
+#high during low low water
+
+# γ - The death rate of predators,
+#they disappear and forage elsewhere 
+
+# δ - The rate at which predators increase by consuming prey.
+
+
+PrPred(5, 1, 5, 3)
 
 
 
