@@ -34,7 +34,7 @@ for (i in seq_along(days)) {
                          sd = sd))
 }
 
-
+water_year <- as.data.frame(water_year)
 
 
 water_year |> 
@@ -58,7 +58,7 @@ water_year |>
             label = paste(
               'Dry Days: ', 
               water_year |> 
-                filter(water_depth <= 10) |> 
+                dplyr::filter(water_depth <= 10) |> 
                 nrow()
             )) +
   coord_cartesian(xlim = c(0, (365*years)), # This focuses the x-axis on the range of interest
@@ -112,7 +112,7 @@ dataInput <- data.frame(intensity_bird = intensity_bird,
 
 ggplot(dataInput) +
   geom_vline(xintercept = 10, 
-             size = 1.5, 
+             linewidth = 1.5, 
              color = 'grey') +
   geom_line(aes(x = depth_cm, y = intensity_bird), 
             color = 'blue', linewidth = 2) +
