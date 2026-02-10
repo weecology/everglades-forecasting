@@ -264,7 +264,7 @@ mod1 <- mvgam(
        xt = list(bs = 'cr'))
     ,
   
-  trend_model = VAR(), 
+  trend_model = CAR(), 
 
   
   
