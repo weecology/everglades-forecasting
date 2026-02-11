@@ -213,6 +213,13 @@ mtext(outer = TRUE, side = 3, "Lorenz model", cex = 1.5)
 
 
 
+# Turing patterns  --------------------------------------------------------
+
+# https://github.com/ijmbarr/turing-patterns/blob/master/turing-patterns.ipynb
+# file:///C:/Users/alexanderblochel/OneDrive%20-%20University%20of%20Florida/Desktop/books/b978-0-12-397014-5.00001-8.pdf
+
+
+
 # migration  --------------------------------------------------------------
 
 
