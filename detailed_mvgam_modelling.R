@@ -167,7 +167,7 @@ mod1 <- mvgam(
   
   # Process model that contains the hierarchical temporal smooths
   trend_formula = ~
-    #0 + #think adding 0+ makes it hierarchical. not sure
+    0 + #think adding 0+ makes it hierarchical. not sure
     
     # Shared smooth of x for all series
     s(init_depth, 
@@ -196,13 +196,13 @@ mod1 <- mvgam(
     
     # Shared smooth of x for all series
     s(recession, 
-      bs = 'cr') +
+      bs = 'cr') #+
     
-     # Deviation smooths for each series
-     s(recession,                                       #removing this makes R_hat larger
-       trend,
-       bs = 'sz',
-       xt = list(bs = 'cr'))
+    # # Deviation smooths for each series
+    # s(recession,                                       #removing this makes R_hat larger
+    #   trend,
+    #   bs = 'sz',
+    #   xt = list(bs = 'cr'))
   ,
   
   trend_model = VAR(), 
@@ -227,7 +227,7 @@ mod1 <- mvgam(
   family = nb(),
   
   
-  control = list(max_treedepth = 12,   #10 
+  control = list(max_treedepth = 10,   #10 
                  adapt_delta = 0.9),   #0.8
   
   # Each series shares the same nb shape parameter
