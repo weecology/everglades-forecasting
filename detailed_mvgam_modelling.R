@@ -162,12 +162,12 @@ data_train |>
 
 # Fit the model
 mod1 <- mvgam(
-  # Observation formula containing region-level intercepts
+  # Observation formula containing species-level intercepts
   formula = count ~ series,
   
   # Process model that contains the hierarchical temporal smooths
   trend_formula = ~
-    0 + #think adding 0+ makes it hierarchical. not sure
+    0 + #think adding 0 makes it structured. not sure
     
     # Shared smooth of x for all series
     s(init_depth, 
@@ -211,13 +211,13 @@ mod1 <- mvgam(
     # trend_map forces species to track same /different latent signals
     data.frame(
       series = unique(data_train$series),
-      trend = c(1, 2, 3, 2, 4, 1)
+      trend = c(1, 1, 2, 1, 3, 4)
     ),
   
   
   # Updated prior distributions for the series-level 
   # intercepts using brms::prior()
-  priors = def_priors,
+  priors = ar_sp_intercept_prior,
   
   # Training and testing data in mvgam's long format
   data = data_train,
