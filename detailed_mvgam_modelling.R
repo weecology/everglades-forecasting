@@ -211,7 +211,7 @@ mod1 <- mvgam(
     # trend_map forces species to track same /different latent signals
     data.frame(
       series = unique(data_train$series),
-      trend = c(1, 2, 3, 4, 5, 6)
+      trend = c(1, 2, 3, 2, 4, 1)
     ),
   
   
