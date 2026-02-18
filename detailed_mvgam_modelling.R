@@ -167,7 +167,7 @@ mod1 <- mvgam(
   
   # Process model that contains the hierarchical temporal smooths
   trend_formula = ~
-    0 + #think adding 0 makes it structured. not sure
+    0 + #think adding 0 makes it structure. not sure
     
     # Shared smooth of x for all series
     s(init_depth, 
