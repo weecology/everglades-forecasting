@@ -1,3 +1,6 @@
+
+# simple mvgam modeling  --------------------------------------------------
+
 # mvgam_forecasting -------------------------------------------------------
 
 
@@ -62,10 +65,6 @@ plot_mvgam_series(data = data_train,
        x = 'Time', 
        title = 'all')
 
-count_env_data_all |> 
-  ggplot(aes(year, count)) +
-  geom_point()
-
 #features of series all
 unique(data_train$series)
 plot_mvgam_series(data = data_train,
@@ -120,135 +119,71 @@ summary(data_train$count)
 
 # priors ------------------------------------------------------------------
 
-def_priors <- get_mvgam_priors(
-  # Observation formula containing species intercepts
-  formula = count ~ series,
-  
-  # Process model that contains the hierarchical temporal smooths
-  trend_formula = ~
-    0 +
-    
-    # Shared smooth of year for all series
-    s(year, 
-      # there are 13 years in the training data
-      k = 13, 
-      bs = 'cr') +
-    
-    # Deviation smooths for each species
-    s(year, 
-      trend, 
-      # there are 13 years in the training data
-      k = 13, 
-      bs = 'sz', 
-      xt = list(bs = 'cr')),
-  data = data_train,
-  family = nb()
-)
-
-def_priors
-
-sigma_prior <- prior(beta(10, 10), class = sigma, lb = 0.2, ub = 1)
-intercept_prior <- prior(normal(0, 0.001), class = Intercept)
-ar_sp_intercept_prior <- prior(std_normal(), class = b)
-
-gam_var_priors <- c(sigma_prior, ar_sp_intercept_prior, intercept_prior)
-
-data_train |> 
-  filter(count != 0) |> 
-  #filter(species != 'rosp')  |> 
-  as.data.frame()  |> 
-  ggplot(aes( recession, count)) +
-  geom_point() +
-  facet_wrap(~species, 
-             scales = 'free')
+# def_priors <- get_mvgam_priors(
+#   # Observation formula containing species intercepts
+#   formula = count ~ series,
+#   
+#   # Process model that contains the hierarchical temporal smooths
+#   trend_formula = ~
+#     0 +
+#     
+#     # Shared smooth of year for all series
+#     s(year, 
+#       # there are 13 years in the training data
+#       k = 13, 
+#       bs = 'cr') +
+#     
+#     # Deviation smooths for each species
+#     s(year, 
+#       trend, 
+#       # there are 13 years in the training data
+#       k = 13, 
+#       bs = 'sz', 
+#       xt = list(bs = 'cr')),
+#   data = data_train,
+#   family = nb()
+# )
+# 
+# def_priors
+# 
+# sigma_prior <- prior(beta(10, 10), class = sigma, lb = 0.2, ub = 1)
+# intercept_prior <- prior(normal(0, 0.001), class = Intercept)
+# ar_sp_intercept_prior <- prior(std_normal(), class = b)
+# 
+# gam_var_priors <- c(sigma_prior, ar_sp_intercept_prior, intercept_prior)
+# 
+# data_train |> 
+#   filter(count != 0) |> 
+#   #filter(species != 'rosp')  |> 
+#   as.data.frame()  |> 
+#   ggplot(aes( recession, count)) +
+#   geom_point() +
+#   facet_wrap(~species, 
+#              scales = 'free')
 
 # model -------------------------------------------------------------------
 
 # Fit the model
-mod1 <- mvgam(
-  # Observation formula containing species-level intercepts
-  formula = count ~ series,
-  
-  # Process model that contains the hierarchical temporal smooths
-  trend_formula = ~
-    0 + #think adding 0 makes it structure. not sure
-    
-    # Shared smooth of x for all series
-    s(init_depth, 
-      bs = 'cr') +
-    
-    # Shared smooth of x for all series
-    s(dry_days, 
-      bs = 'cr') +
-    
-    # Deviation smooths for each series
-    s(dry_days,
-      trend,
-      bs = 'sz',
-      xt = list(bs = 'cr'))+
-    
-    # Shared smooth of x for all series
-    s(breed_season_depth, 
-      bs = 'cr') +
-    # 
-    # # Deviation smooths for each series
-    s(breed_season_depth,
-      trend,
-      bs = 'sz',
-      xt = list(bs = 'cr'))+
-    
-    
-    # Shared smooth of x for all series
-    s(recession, 
-      bs = 'cr') #+
-    
-    # # Deviation smooths for each series
-    # s(recession,                                       #removing this makes R_hat larger
-    #   trend,
-    #   bs = 'sz',
-    #   xt = list(bs = 'cr'))
-  ,
-  
+mod1 <- mvgam(count ~ 
+                s(init_depth, 
+                  bs = 'cr') +
+                s(dry_days, 
+                  bs = 'cr') +
+                s(breed_season_depth, 
+                  bs = 'cr') +
+                s(recession, 
+                  bs = 'cr') 
+              ,
+              
   trend_model = VAR(), 
-  
-  trend_map =
-    # trend_map forces species to track same /different latent signals
-    data.frame(
-      series = unique(data_train$series),
-      trend = c(1, 1, 2, 1, 3, 4)
-    ),
-  
-  
-  # Updated prior distributions for the series-level 
-  # intercepts using brms::prior()
-  priors = ar_sp_intercept_prior,
-  
   # Training and testing data in mvgam's long format
   data = data_train,
   newdata = data_test,
   
   # nb observation model
   family = nb(),
-  
-  
-  control = list(max_treedepth = 10,   #10 
-                 adapt_delta = 0.9),   #0.8
-  
-  # Each series shares the same nb shape parameter
-  # If TRUE and the family has additional 
-  # family-specific observation parameters (e.g., 
-  # variance components, dispersion parameters), 
-  # these will be shared across all outcome variables. 
-  # Useful when multiple outcomes share properties. 
-  share_obs_params = TRUE,
-  
-  # Non-centring the latent states tends to improve
-  # performance in State Space models
   noncentred = TRUE,
   backend = 'cmdstanr',
-  
-  
-  
   samples = 1500
 )
 
@@ -276,9 +211,9 @@ summary(mod1,
         smooth_test = FALSE)
 mcmc_plot(mod1,
           type = 'rhat_hist')
-# mcmc_plot(mod1,
-#           variable = 'obs_params',
-#           type = 'trace')
+mcmc_plot(mod1,
+          variable = 'obs_params',
+          type = 'trace')
 mcmc_plot(mod1,
           variable = 'sigma',
           regex = TRUE,
@@ -377,13 +312,3 @@ plot(fc, series = 6)
 
 augment(mod1, robust = TRUE, probs = c(0.25, 0.75))
 
-# CRPS 
-# LOG SCORE 
-
-# SKILL SCORES 
-
-#baseline model (mvgam lonterm for each species) PORTAL 
-
-
-#kiona ogel lags 
-#nik clark lags - distributed lags section 
