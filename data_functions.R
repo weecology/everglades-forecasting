@@ -84,6 +84,8 @@ get_wading_bird_data <- function(config, path = ".", cache = TRUE) {
       fill_missing = fill_missing,
       fill_value = fill_value,
       min_years = min_years,
+      min_nonzero_years = min_nonzero_years,
+      min_unique_counts = min_unique_counts,
       include_regions = config$spatial$include_regions,
       exclude_regions = config$spatial$exclude_regions,
       include_colonies = config$spatial$include_colonies,
