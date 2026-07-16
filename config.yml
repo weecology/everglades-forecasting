@@ -8,10 +8,12 @@
 default:
   # Spatial configuration
   spatial:
-    level: subregion                    # "all", "subregion", "colony"
+    level: subregion                    # "all" = Everglades-wide, "subregion" = region, "colony" = colony
     fill_missing: true
     fill_value: 0
     min_years_required: 10
+    min_nonzero_years: 3                # Drop sparse series with too few non-zero observations
+    min_unique_counts: 2                # Drop flat series with no variation
     exclude_regions: []
     include_regions: []
     exclude_colonies: []

@@ -48,7 +48,7 @@ remotes::install_github("weecology/edenr")        # Everglades water data
 ```
 
 
-## Strucutre
+## Structure
 ```
 .
 ├── main.R                          # Main execution script
@@ -80,13 +80,17 @@ remotes::install_github("weecology/edenr")        # Everglades water data
     
 ## Workflow
 
-#config.R
+# config.yml
 choose 
 - dgam/fable models you want to use. 
 - run fable and dgam
 - ordinal evaluation or not
 - ordinal breaks
 - training and testing windown size
+- spatial scale labels:
+  - all = Everglades-wide
+  - subregion = region
+  - colony = colony
 
 ```
 

@@ -70,6 +70,8 @@ get_wading_bird_data <- function(config, path = ".", cache = TRUE) {
   fill_missing <- config$spatial$fill_missing %||% TRUE
   fill_value   <- config$spatial$fill_value   %||% 0
   min_years    <- config$spatial$min_years_required %||% 10
+  min_nonzero_years <- config$spatial$min_nonzero_years %||% 3
+  min_unique_counts <- config$spatial$min_unique_counts %||% 2
   
   # =========================================================================
   # CACHING
@@ -251,6 +253,44 @@ get_wading_bird_data <- function(config, path = ".", cache = TRUE) {
       "Spatial level '{level}' not recognized. ",
       "Use 'all', 'subregion', or 'colony'."
     ))
+  }
+
+  # ==========================================================================
+  # SPARSE / FLAT SERIES FILTERING (helps small-scale runs)
+  # ==========================================================================
+  key_cols <- if (level == "all") "species" else c("species", "region")
+
+  series_summary <- combined |>
+    as_tibble() |>
+    group_by(across(all_of(key_cols))) |>
+    summarise(
+      nonzero_years = sum(count > 0, na.rm = TRUE),
+      unique_counts = n_distinct(count),
+      .groups = "drop"
+    )
+
+  series_to_drop <- series_summary |>
+    filter(nonzero_years < min_nonzero_years | unique_counts < min_unique_counts)
+
+  if (nrow(series_to_drop) > 0) {
+    cat(glue::glue(
+      "\n⚠️  Dropping {nrow(series_to_drop)} sparse/flat series ",
+      "(min_nonzero_years = {min_nonzero_years}, min_unique_counts = {min_unique_counts})\n"
+    ))
+    print(series_to_drop)
+
+    combined <- combined |>
+      as_tibble() |>
+      anti_join(
+        series_to_drop |> dplyr::select(all_of(key_cols)),
+        by = key_cols
+      )
+
+    combined <- if (level == "all") {
+      combined |> as_tsibble(key = species, index = year)
+    } else {
+      combined |> as_tsibble(key = c(species, region), index = year)
+    }
   }
   
   # ==========================================================================
