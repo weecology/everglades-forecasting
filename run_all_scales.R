@@ -30,7 +30,7 @@ cat("📂 Results folder:", scale_run_folder, "\n\n")
 # LOAD BASE CONFIGURATION
 # =============================================================================
 
-base_profile <- "run_all_scales_fable"
+base_profile <- "run_all_scales_all"
 Sys.setenv(R_CONFIG_ACTIVE = base_profile)
 base_config <- config::get()
 

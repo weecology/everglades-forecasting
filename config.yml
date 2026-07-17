@@ -56,12 +56,12 @@ default:
   test_years: 2
   cv_windows: null              # null = all windows, or set number to limit
 
-  # Parallel processing (NEW!)
+  # Parallel processing 
   parallel:
     enabled: true
     workers: null                # null = auto-detect cores
 
-  # Caching (NEW!)
+  # Caching
   cache:
     data: true
     models: false                # Set to true to cache fitted models
@@ -69,8 +69,8 @@ default:
 
   # MCMC settings (mvgam)
   chains: 4
-  burnin: 1500
-  samples: 1500
+  burnin: 2000
+  samples: 2000
   adapt_delta: 0.95              # Stan tuning (higher = more accurate but slower)
   max_treedepth: 10              # Stan tuning
 
@@ -705,44 +705,53 @@ test_totals:
     
     
     
-run_all_scales_fable:
+run_all_scales_all:
   inherits: default
-  
+
   spatial:
     include_species: "top6"        # Top 6 species
     include_unknowns: false
     min_years_required: 10
-    
+
   models:
-    mvgam: []                      # No mvgam models
+    mvgam:
+      - baseline
+      - ar
+      - ar_exog
+      - ar_exog_plus
+      - species_specific
+      - trait
+      - trait2
     fable:
       - baseline
       - arima
       - tslm
       - arima_exog
       - gam
-      
-  run_mvgam: false                 # Disable mvgam
-  run_fable: true                  # Enable fable
-  
-  chains: 2
-  burnin: 500
-  samples: 500
-  cv_windows: 3                    # Limit windows for speed
-  
-  use_ordinal: true
-  
+  run_mvgam: true
+  run_fable: true
+  # Full MCMC
+  chains: 4
+  burnin: 2000
+  samples: 2000
+  adapt_delta: 0.99
+  max_treedepth: 12
+  # All CV windows
+  cv_windows: null
+  # Full parallel
   parallel:
     enabled: true
-    workers: 4
-    
+    workers: null
+  # Caching
   cache:
     data: true
-    models: false
-    
+    models: true
+  # Full evaluation
+  use_ordinal: true
+  # All plots
   plots:
-    forecast_timeseries: true
     skill_over_time: true
     best_model_counts: true
-    ts_models: ["baseline", "arima", "gam"]
+    forecast_timeseries: true
+    ts_models: ["baseline", "ar", "trait"]
     ts_species: ["gbhe", "greg", "rosp", "wost", "whib", "sneg"]
