@@ -1002,26 +1002,43 @@ plot_forecast_ts_grid <- function(results, data, models = NULL,
   if (framework == "mvgam") {
     forecasts <- as_tibble(results$mvgam$forecasts)
     model_col <- "model"
-    if (is.null(models))  models  <- unique(forecasts$model)[1:2]
-    if (is.null(species)) species <- unique(forecasts$species)[1:2]
   } else {
     forecasts <- as_tibble(results$fable$forecasts)
     model_col <- ".model"
-    if (is.null(models))  models  <- unique(forecasts$.model)[1:2]
-    # if (is.null(species)) species <- unique(forecasts$species)[1:2]
   }
   
+  # 1. Safely intersect requested models with available models
   available_models <- unique(forecasts[[model_col]])
-  models           <- intersect(models, available_models)
+  if (is.null(models)) models <- available_models[1:min(3, length(available_models))] # Default to up to 3 models
+  models <- intersect(models, available_models)
   
   if (length(models) == 0) {
     cat("⚠️  None of the requested models found in forecasts\n")
     return(invisible(NULL))
   }
   
+  # 2. Safely get the species to plot
+  available_species <- unique(forecasts$species)
+  
+  # If no species were passed from config, default to ALL available species
+  if (is.null(species)) {
+    species <- available_species
+  }
+  
+  # Intersect to make sure we don't try to plot a bird that isn't in the data
+  species <- intersect(species, available_species)
+  
+  # Fallback: If config specifically asked for "gbhe" but data only has "Total",
+  # the intersect above becomes empty. This catches that and defaults to whatever is available.
+  if (length(species) == 0) {
+    cat("⚠️  Requested species not found. Falling back to plotting available data.\n")
+    species <- available_species
+  }
+  
   test_start <- find_valid_test_start(forecasts, models, model_col)
   cat("  Using test_start:", test_start, "for ts grid\n")
   
+  # Set up the plotting grid (rows = species, columns = models)
   par(mfrow = c(length(species), length(models)))
   
   for (sp in species) {

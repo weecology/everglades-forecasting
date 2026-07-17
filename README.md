@@ -3,20 +3,26 @@
 A comparative forecasting framework for Everglades wading bird populations using dynamic GAMs and traditional time series models.
 
 ## Overview
+This project implements sliding window cross-validation to compare multiple forecasting approaches for wading bird populations in the Florida Everglades. Models incorporate water management covariates and evaluate predictions using both numeric (CRPS) and ordinal (RPS) metrics.
 
-This project implements sliding window cross-validation to compare multiple forecasting approaches for six wading bird species in the Florida Everglades. Models incorporate water management covariates and evaluate predictions using both numeric (CRPS) and ordinal (RPS) metrics.
+**Species Options:**
+The pipeline dynamically handles species filtering based on configuration:
+- **`top6` (Default):** 
+  - Great Blue Heron (gbhe)
+  - Great Egret (greg)
+  - Roseate Spoonbill (rosp)
+  - Snowy Egret (sneg)
+  - White Ibis (whib)
+  - Wood Stork (wost)
+- **`all`:** All identified species in the database.
+- **Custom List:** E.g., `["anhi", "limp", "snki"]`.
+- **Unknowns:** Option to retain unidentified counts (e.g., small white heron) via `include_unknowns`.
+- **System Totals:** Option to aggregate all selected species into a single `Total` biomass count for system-wide or regional capacity forecasting.
 
-**Species analyzed:**
-- Great Blue Heron (gbhe)
-- Great Egret (greg)
-- Roseate Spoonbill (rosp)
-- Snowy Egret (sneg)
-- White Ibis (whib)
-- Wood Stork (wost)
-***spatial hierarchy:***
-```r
+**Spatial Hierarchy:**
+```text
 all
- └── subregion (8 regions: 1, 2a, 2b, 3an, 3as, 3ase, 3b, inlandenp)
+└── subregion (8 regions: 1, 2a, 2b, 3an, 3as, 3ase, 3b, inlandenp)
       └── colony (33 viable colonies ≥15 years)
 ``` 
 
@@ -33,18 +39,22 @@ install.packages(c(
   "feasts",        # Feature extraction
   "ggplot2",       # Figures
   "glue",          # String formatting
-  "remotes",       
-  "scales", 
+  "remotes",       # install from github
+  "scales",        # for nice plotts 
   "tidyr",         # Data structure
   "tsibble",       # Time series tibbles
   "verification",  # RPS scoring
-  "zoo"            # Interpolation
+  "zoo",           # Interpolation
+  "future",        # Parallel processing
+  "furrr",         # Parallel mapping
+  "digest"         # Caching
 ))
 
 # Install from GitHub
 remotes::install_github("nicholasjclark/mvgam")  # Dynamic GAMs
 remotes::install_github("weecology/wader")        # Bird count data
 remotes::install_github("weecology/edenr")        # Everglades water data
+remotes::install_github("hendersontrent/fable.gam") #Fable GAMs
 ```
 
 
@@ -52,18 +62,21 @@ remotes::install_github("weecology/edenr")        # Everglades water data
 ```
 .
 ├── main.R                          # Main execution script
-├── config.yml                      # Configuration settings
-├── data_functions.R                # Data loading and preparation
+├── config.yml                      # Configuration profiles & settings
+├── data_functions.R                # Data loading, aggregation, and caching
 ├── evaluation.R                    # Cross-validation and metrics
 ├── plotting.R                      # Visualization functions
 ├── final_year_plots.R              # Forecast vs actual for latest year
+├── cache/                          # Auto-generated data/model cache folder
 ├── models/
-│   ├── mvgam_baseline.R           # Baseline mvgam model
-│   ├── mvgam_ar.R                 # AR model with water covariates
-│   ├── mvgam_ar_exog.R            # AR with polynomial covariates
+│   ├── mvgam_baseline.R           # Baseline random walk model
+│   ├── mvgam_ar.R                 # AR model with smooth water covariates
+│   ├── mvgam_ar_exog.R            # AR with linear covariates
+│   ├── mvgam_ar_exog_plus.R       # AR with tensor product interactions
 │   ├── mvgam_species_specific.R   # Species-specific smooth responses
-│   ├── mvgam_trait.R              # Trait-based VAR model
-│   └── fable_models.R             # ARIMA, TSLM, ARIMA-exog
+│   ├── mvgam_trait.R              # Trait-weighted covariate effects
+│   ├── mvgam_trait2.R             # Traits + guilds + body size
+│   └── fable_models.R             # ARIMA, TSLM, ARIMA-exog, GAM
 └── results/
     ├── run_all_YYYYMMDD-HHMM/
 │       ├── forecast_results.rds
@@ -73,7 +86,7 @@ remotes::install_github("weecology/edenr")        # Everglades water data
 │       ├── mvgam_best_model_counts.png
 │       └── forecasts/
 │           ├── mvgam_gbhe_trait.png
-│           ├── mvgam_greg_trait.png
+│           ├── mvgam_Total_ar_exog.png    # If forecast_totals = true
 │           └── ... (all species × models)
 ```     
     
@@ -140,8 +153,10 @@ Step 2: Convert predictions to category probabilities
 ↓
 Step 3: Score predicted probabilities vs actual category
         Lower = Better
-        
-#skill score
+```
+
+# skill score
+```
 skill_score = 1 - (model_score / baseline_score)
 
 > 0: Better than baseline
@@ -163,26 +178,38 @@ Four plots generated per model framework:
 ```r 
 default:
   spatial:
-    level: all              # "all", "subregion", or "colony"
-    run_by_region: false    # true = separate model per spatial unit
-    min_years_required: 10  # Minimum years to include a spatial unit
-
+    level: all                    # "all", "subregion", or "colony"
+    run_by_region: false          # true = separate model per spatial unit
+    forecast_totals: false        # true = sum counts to a single 'Total' category
+    include_species: "top6"       # "top6", "all", or list e.g., ["wost", "whib"]
+    include_unknowns: true        # true = keep 'unkn', 'smwh', etc. when using 'all'
+    min_years_required: 10        # Minimum years to include a spatial unit
+    
   models:
-    mvgam: [baseline, ar, ar_exog, species_specific, trait]
-    fable: [baseline, arima, tslm, arima_exog]
-
-  run_mvgam: true           # Enable/disable mvgam framework
-  run_fable: true           # Enable/disable fable framework
-  use_ordinal: true         # true = CRPS + RPS, false = CRPS only
-
-  ordinal_breaks: [0.33, 0.50, 0.67]   # Category boundaries (quantiles)
-  sliding_window_breaks: true           # true = recompute per window
-  ordinal_years: All                    # Years used to define breaks
-
-  train_years: 20           # Training window size
-  test_years: 2             # Test window size
-  chains: 4                 # MCMC chains
-  burnin: 1500              # MCMC warmup iterations
-  samples: 1500             # MCMC sampling iterations
+    mvgam: [baseline, ar, ar_exog, ar_exog_plus, species_specific, trait, trait2]
+    fable: [baseline, arima, tslm, arima_exog, gam]
+    
+  run_mvgam: true                 # Enable/disable mvgam framework
+  run_fable: true                 # Enable/disable fable framework
+  
+  use_ordinal: true               # true = CRPS + RPS, false = CRPS only
+  ordinal_breaks: [0.33, 0.50, 0.67] # Category boundaries (quantiles)
+  sliding_window_breaks: true     # true = recompute per window
+  ordinal_years: All              # Years used to define breaks
+  
+  train_years: 20                 # Training window size
+  test_years: 2                   # Test window size
+  
+  parallel:
+    enabled: true                 # Multicore processing
+    workers: null                 # null = auto-detect cores
+    
+  cache:
+    data: true                    # Speed up reruns by caching data prep
+    models: false                 # Speed up reruns by caching fitted models
+    
+  chains: 4                       # MCMC chains
+  burnin: 1500                    # MCMC warmup iterations
+  samples: 1500                   # MCMC sampling iterations
 ```
     

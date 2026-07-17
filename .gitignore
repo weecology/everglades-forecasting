@@ -17,6 +17,7 @@
 
 # Output/Results
 results/
+*.png
 *.rds
 *.csv
 *.xlsx

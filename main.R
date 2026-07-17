@@ -1,5 +1,5 @@
 # =============================================================================
-# MAIN.R - Wading Bird Forecasting Pipeline
+# MAIN.R - Wading Bird Forecasting Pipeline ----
 # Optimized for parallel processing and organized output folders
 # =============================================================================
 
@@ -76,10 +76,33 @@ if (!exists("CONFIG")) {
   cat("Using pre-set CONFIG (", attr(CONFIG, "config") %||% "custom", ")\n")
 }
 
+# For totals 
+if (!is.null(CONFIG$spatial$forecast_totals) && isTRUE(CONFIG$spatial$forecast_totals)) {
+  incompatible_models <- c("species_specific", "trait", "trait2")
+  
+  if (any(incompatible_models %in% CONFIG$models$mvgam)) {
+    CONFIG$models$mvgam <- setdiff(CONFIG$models$mvgam, incompatible_models)
+  }
+  
+  # Document which species will be aggregated
+  species_to_aggregate <- if (CONFIG$spatial$include_species == "top6") {
+    "gbhe, greg, rosp, sneg, wost, whib"
+  } else if (CONFIG$spatial$include_species == "all") {
+    if (CONFIG$spatial$include_unknowns) "all species (including unknowns)" else "all identified species"
+  } else {
+    paste(CONFIG$spatial$include_species, collapse = ", ")
+  }
+  
+  cat("  • Aggregating to Total from:", species_to_aggregate, "\n")
+}
+
+
+
 # Print key configuration settings
 cat("\n📋 Configuration Summary:\n")
 cat("  • Environment:", Sys.getenv("R_CONFIG_ACTIVE", "default"), "\n")
 cat("  • Spatial level:", CONFIG$spatial$level, "\n")
+cat("  • Forecast totals:", isTRUE(CONFIG$spatial$forecast_totals), "\n")
 cat("  • Run by region:", CONFIG$spatial$run_by_region, "\n")
 cat("  • mvgam models:", ifelse(CONFIG$run_mvgam, 
                                 paste(CONFIG$models$mvgam, collapse = ", "), "disabled"), "\n")

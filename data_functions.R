@@ -79,6 +79,8 @@ get_wading_bird_data <- function(config, path = ".", cache = TRUE) {
     # Generate cache key based on config
     cache_key <- digest::digest(list(
       level = level,
+      forecast_totals = config$spatial$forecast_totals %||% FALSE, 
+      include_species = config$spatial$include_species %||% "top6",
       fill_missing = fill_missing,
       fill_value = fill_value,
       min_years = min_years,
@@ -106,12 +108,35 @@ get_wading_bird_data <- function(config, path = ".", cache = TRUE) {
   # LOAD DATA (if not cached)
   # =========================================================================
   
-  # Load raw counts and water data
-  counts <- tibble(max_counts(level = level, path = path)) |>
-    filter(species %in% c("gbhe", "greg", "rosp", "sneg", "wost", "whib"))
+  # Determine species preferences from config
+  species_pref <- config$spatial$include_species %||% "top6"
+  include_unknowns <- config$spatial$include_unknowns %||% FALSE
+  
+  # Load raw counts
+  counts <- tibble(max_counts(level = level, path = path))
+  
+  # Filter species based on config
+  if (length(species_pref) == 1 && species_pref == "top6") {
+    counts <- counts |> 
+      filter(species %in% c("gbhe", "greg", "rosp", "sneg", "wost", "whib"))
+    
+  } else if (length(species_pref) == 1 && species_pref == "all") {
+    
+    # 'all' but NO unknowns, filter the generic codes out
+    if (!include_unknowns) {
+      generic_codes <- c("unkn", "lada", "lawh", "smda", "smhe", "smwh")
+      counts <- counts |> 
+        filter(!species %in% generic_codes)
+    }
+    # If include_unknowns is TRUE -> keep everything!
+    
+  } else {
+    # Assume custom list in the yaml (e.g., ["wost", "anhi", "unkn"])
+    counts <- counts |> 
+      filter(species %in% species_pref)
+  }
   
   water <- get_data_water()
-  
   # ==========================================================================
   # ALL (system-wide)
   # ==========================================================================
@@ -269,6 +294,44 @@ get_wading_bird_data <- function(config, path = ".", cache = TRUE) {
   } else {
     cat("✅ No missing values in numeric columns\n")
   }
+  
+  
+  # ==========================================================================
+  # AGGREGATE TO TOTALS (If configured)
+  # ==========================================================================
+  if (!is.null(config$spatial$forecast_totals) && isTRUE(config$spatial$forecast_totals)) {
+    cat("\n=== Aggregating to TOTAL Counts ===\n")
+    cat("Collapsing all species into a single 'Total' category...\n")
+    
+    # Drop tsibble class temporarily to do dplyr operations safely
+    combined_df <- as_tibble(combined)
+    
+    # Determine grouping columns dynamically
+    group_cols <- "year"
+    if ("region" %in% names(combined_df)) group_cols <- c(group_cols, "region")
+    
+    # Identify water covariate columns (everything else)
+    water_cols <- setdiff(names(combined_df), c(group_cols, "species", "count"))
+    
+    # Aggregate
+    combined <- combined_df |>
+      dplyr::group_by(dplyr::across(dplyr::all_of(group_cols))) |>
+      dplyr::summarise(
+        count = sum(count, na.rm = TRUE),
+        # Water covariates are identical for a given year/region, so take the first
+        dplyr::across(dplyr::all_of(water_cols), ~ dplyr::first(.x)),
+        .groups = "drop"
+      ) |>
+      dplyr::mutate(species = "Total")
+    
+    # Re-create the tsibble
+    if ("region" %in% names(combined)) {
+      combined <- as_tsibble(combined, key = c(species, region), index = year)
+    } else {
+      combined <- as_tsibble(combined, key = species, index = year)
+    }
+  }
+  
   
   # Attach metadata
   attr(combined, "spatial_level") <- level
