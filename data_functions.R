@@ -248,13 +248,16 @@ get_wading_bird_data <- function(config, path = ".", cache = TRUE) {
     cat("Colonies after year filter (>=", min_years, "years):",
         length(unique(counts$colony)), "\n")
     
-    # Fill missing years per colony
+    # Fill missing years per colony (FOR MVGAM)
     if (fill_missing) {
       counts <- counts |>
-        group_by(colony, subregion, species) |>
-        complete(year = full_seq(year, 1),
-                 fill = list(count = fill_value)) |>
-        ungroup()
+        ungroup() |>
+        complete(
+          year = full_seq(year, 1), 
+          tidyr::nesting(colony, subregion),
+          species, 
+          fill = list(count = fill_value)
+        )
     }
     
     # Join water data via subregion (colony inherits from subregion)
