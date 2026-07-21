@@ -70,7 +70,7 @@ make_fable_forecasts <- function(train_data, test_data, models_to_run = NULL,
   model_specs <- character()
   
   if ("baseline" %in% models_to_run) {
-    model_specs <- c(model_specs, "baseline = MEAN(count)")
+    model_specs <- c(model_specs, "baseline = RW(count)")                                     #"The future will be like today" (Random Walk)
   }
   if ("arima" %in% models_to_run) {
     model_specs <- c(model_specs, "arima = ARIMA(count)")

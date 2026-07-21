@@ -3,7 +3,11 @@ fit_mvgam_baseline <- function(train_data, test_data, config) {
   
   tryCatch({
     model <- mvgam(
-      formula = count ~ series,
+      formula = count ~ 1,           
+      trend_model = RW(),            
+      #trend_model = RW() — This makes it a proper random walk baseline (the time-series equivalent of "just predict tomorrow will be like today")
+      #this might want to be modefied? 
+      #check fable null model... 
       data = train_data,
       family = nb(),
       chains = config$chains,
