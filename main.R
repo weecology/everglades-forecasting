@@ -31,8 +31,6 @@ print_section <- function(text, char = "-") {
 print_banner("WADING BIRD FORECASTING PIPELINE")
 cat("Starting at:", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "\n")
 
-cat("\nLoading libraries...\n")
-
 suppressPackageStartupMessages({
   library(config)
   library(conflicted)
@@ -50,7 +48,7 @@ suppressPackageStartupMessages({
   library(progressr)
 })
 
-cat("✓ Core libraries loaded\n")
+
 
 # Handle namespace conflicts
 conflict_prefer("filter",    "dplyr")

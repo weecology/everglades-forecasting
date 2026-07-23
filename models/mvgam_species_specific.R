@@ -1,18 +1,32 @@
 fit_mvgam_species_specific <- function(train_data, test_data, config) {
   cat("  Fitting species-specific model...\n")
   
+  
+  model_family <- if (is.null(config$family)) {
+    NA
+  } else if (config$family == "poisson") {
+    poisson()
+  } else if (config$family == "nb") {
+    nb()
+  } else if (config$family == "gaussian") {
+    gaussian()
+  } else {
+    NA
+  }
+  
   tryCatch({
     model <- mvgam(
       formula = count ~ series,
       trend_formula = ~
         s(breed_season_depth, bs = 'cr', k = 5) +
         s(dry_days, bs = 'cr', k = 5) +
-        s(breed_season_depth, by = trend, bs = 'fs', k = 4) +
+        s(breed_season_depth, by = trend, bs = 'sz', xt = list(bs = 'cr'),, k = 4) +
         s(dry_days, by = trend, bs = 'fs', k = 4),
       trend_model = mvgam::AR(),
       noncentred = TRUE,
+      control = list(adapt_delta = 0.99, max_treedepth = 12),
       data = train_data,
-      family = nb(),
+      family = model_family,
       chains = config$chains,
       burnin = config$burnin,
       samples = config$samples

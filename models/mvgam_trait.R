@@ -34,6 +34,16 @@ fit_mvgam_trait <- function(train_data, test_data, config) {
   # FIT MODEL
   # =========================================================================
   
+  model_family <- if (is.null(config$family)) {
+    NA
+  } else if (config$family == "poisson") {
+    poisson()
+  } else if (config$family == "nb") {
+    nb()
+  } else {
+    NA
+  }
+  
   tryCatch({
     model <- mvgam(
       formula = count ~ series,
@@ -44,10 +54,12 @@ fit_mvgam_trait <- function(train_data, test_data, config) {
         reversals,
       trend_model = mvgam::AR(p = 1),
       data = train_enriched,
-      family = nb(),
+      family = model_family,
       chains = config$chains,
       burnin = config$burnin,
-      samples = config$samples
+      samples = config$samples,
+      noncentred = TRUE,
+      control = list(adapt_delta = 0.99, max_treedepth = 12),
     )
     
     fc <- forecast(model, newdata = test_enriched)

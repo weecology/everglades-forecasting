@@ -1,6 +1,20 @@
 fit_mvgam_ar_exog_plus <- function(train_data, test_data, config) {
   cat("  Fitting AR exog plus model...\n")
   
+  
+  model_family <- if (is.null(config$family)) {
+    NA
+  } else if (config$family == "poisson") {
+    poisson()
+  } else if (config$family == "nb") {
+    nb()
+  } else if (config$family == "gaussian") {
+    gaussian()
+  } else {
+    NA
+  }
+  
+  
   tryCatch({
     model <- mvgam(
       formula = count ~ 1,
@@ -14,7 +28,9 @@ fit_mvgam_ar_exog_plus <- function(train_data, test_data, config) {
         ti(init_depth, dry_days, bs = 'cr', k = 5),
       trend_model = mvgam::AR(),
       data = train_data,
-      family = nb(),
+      family = model_family,
+      noncentred = TRUE,
+      control = list(adapt_delta = 0.99, max_treedepth = 12),
       chains = config$chains,
       burnin = config$burnin,
       samples = config$samples
