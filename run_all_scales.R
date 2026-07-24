@@ -16,7 +16,7 @@ scale_run_folder <- file.path("results", paste0("scale_run_", timestamp))
 
 # Create main folder and subfolders for each scale
 dir.create(scale_run_folder, recursive = TRUE, showWarnings = FALSE)
-dir.create(file.path(scale_run_folder, "all"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(scale_run_folder, "system"), recursive = TRUE, showWarnings = FALSE)
 dir.create(file.path(scale_run_folder, "subregion"), recursive = TRUE, showWarnings = FALSE)
 dir.create(file.path(scale_run_folder, "colony"), recursive = TRUE, showWarnings = FALSE)
 
@@ -42,7 +42,7 @@ cat("✓ Base configuration saved\n\n")
 # SCALES TO RUN
 # =============================================================================
 
-scales_to_run <- c("all", "subregion", "colony")
+scales_to_run <- c("system", "subregion", "colony")
 completed_folders <- list()
 
 # =============================================================================
@@ -60,8 +60,8 @@ for (current_scale in scales_to_run) {
   CONFIG <- base_config
   CONFIG$spatial$level <- current_scale
   
-  # For system-wide ("all"), ensure run_by_region is FALSE
-  if (current_scale == "all") {
+  # For system-wide ("system"), ensure run_by_region is FALSE
+  if (current_scale == "system") {
     CONFIG$spatial$run_by_region <- FALSE
   }
   
@@ -167,7 +167,7 @@ extract_metrics <- function(folder_path, scale_name) {
 }
 
 # Extract metrics from all scales
-data_all       <- extract_metrics(completed_folders[["all"]], "All")
+data_system       <- extract_metrics(completed_folders[["system"]], "system")
 data_subregion <- extract_metrics(completed_folders[["subregion"]], "Region")
 data_colony    <- extract_metrics(completed_folders[["colony"]], "Colony")
 
@@ -181,7 +181,7 @@ if (nrow(plot_data) == 0) {
 # Add scale factor and winsorize
 plot_data <- plot_data |>
   mutate(
-    scale = factor(scale, levels = c("Colony", "Region", "All"))
+    scale = factor(scale, levels = c("Colony", "Region", "System"))
   )
 
 # Save combined metrics
@@ -200,7 +200,7 @@ cat("  Metrics available:", paste(names(plot_data)[grepl("skill", names(plot_dat
 cat("\n📈 Generating comparison plots...\n")
 
 # Define colors
-scale_colors <- c("Colony" = "#00B050", "Region" = "#FF0000", "All" = "#000000")
+scale_colors <- c("Colony" = "#00B050", "Region" = "#FF0000", "system" = "#000000")
 
 # Available skill metrics
 skill_metrics <- intersect(c("crps_skill", "rps_skill", "rmse_skill"), names(plot_data))

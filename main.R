@@ -2,13 +2,11 @@
 # MAIN.R - Wading Bird Forecasting Pipeline ----
 # Optimized for parallel processing and organized output folders
 # =============================================================================
-
 start_time <- Sys.time()
 
 # =============================================================================
 # UTILITY FUNCTIONS
 # =============================================================================
-
 `%||%` <- function(x, y) if (is.null(x)) y else x
 
 # Print banner
@@ -27,7 +25,6 @@ print_section <- function(text, char = "-") {
 # =============================================================================
 # LIBRARY LOADING
 # =============================================================================
-
 print_banner("WADING BIRD FORECASTING PIPELINE")
 cat("Starting at:", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "\n")
 
@@ -48,8 +45,6 @@ suppressPackageStartupMessages({
   library(progressr)
 })
 
-
-
 # Handle namespace conflicts
 conflict_prefer("filter",    "dplyr")
 conflict_prefer("select",    "dplyr")
@@ -59,11 +54,9 @@ conflict_prefer("RW",        "mvgam")
 conflict_prefer("get",       "base")
 conflict_prefer("as.matrix", "base")
 
-
 # =============================================================================
 # LOAD CONFIGURATION
 # =============================================================================
-
 print_section("CONFIGURATION")
 
 if (!exists("CONFIG")) {
@@ -74,7 +67,7 @@ if (!exists("CONFIG")) {
   cat("Using pre-set CONFIG (", attr(CONFIG, "config") %||% "custom", ")\n")
 }
 
-# For totals 
+# For totals
 if (!is.null(CONFIG$spatial$forecast_totals) && isTRUE(CONFIG$spatial$forecast_totals)) {
   incompatible_models <- c("species_specific", "trait", "trait2")
   
@@ -94,20 +87,18 @@ if (!is.null(CONFIG$spatial$forecast_totals) && isTRUE(CONFIG$spatial$forecast_t
   cat("  • Aggregating to Total from:", species_to_aggregate, "\n")
 }
 
-
-
 # Print key configuration settings
 cat("\n📋 Configuration Summary:\n")
 cat("  • Environment:", Sys.getenv("R_CONFIG_ACTIVE", "default"), "\n")
 cat("  • Spatial level:", CONFIG$spatial$level, "\n")
 cat("  • Forecast totals:", isTRUE(CONFIG$spatial$forecast_totals), "\n")
 cat("  • Run by region:", CONFIG$spatial$run_by_region, "\n")
-cat("  • mvgam models:", ifelse(CONFIG$run_mvgam, 
+cat("  • mvgam models:", ifelse(CONFIG$run_mvgam,
                                 paste(CONFIG$models$mvgam, collapse = ", "), "disabled"), "\n")
-cat("  • fable models:", ifelse(CONFIG$run_fable, 
+cat("  • fable models:", ifelse(CONFIG$run_fable,
                                 paste(CONFIG$models$fable, collapse = ", "), "disabled"), "\n")
-cat("  • MCMC: chains =", CONFIG$chains, 
-    "| burnin =", CONFIG$burnin, 
+cat("  • MCMC: chains =", CONFIG$chains,
+    "| burnin =", CONFIG$burnin,
     "| samples =", CONFIG$samples, "\n")
 cat("  • Train years:", CONFIG$train_years, "| Test years:", CONFIG$test_years, "\n")
 cat("  • CV windows:", CONFIG$cv_windows %||% "all", "\n")
@@ -121,7 +112,6 @@ cat("\n")
 # =============================================================================
 # CREATE TIMESTAMPED RUN FOLDER
 # =============================================================================
-
 print_section("CREATING RUN FOLDER")
 
 # Generate timestamp
@@ -140,7 +130,6 @@ cat("  All outputs will be saved to this folder\n")
 # =============================================================================
 # LOAD FUNCTIONS
 # =============================================================================
-
 print_section("LOADING FUNCTIONS")
 
 source("data_functions.R")
@@ -188,7 +177,6 @@ if (CONFIG$run_mvgam) {
 # =============================================================================
 # CLEANUP
 # =============================================================================
-
 print_section("INITIALIZATION")
 
 # Clean up Stan temp files
@@ -213,21 +201,20 @@ if ((CONFIG$cache$data %||% FALSE) || (CONFIG$cache$models %||% FALSE)) {
 # =============================================================================
 # LOAD DATA
 # =============================================================================
-
 print_section("DATA LOADING")
 
 data <- get_wading_bird_data(
-  config = CONFIG, 
+  config = CONFIG,
   cache = CONFIG$cache$data %||% TRUE
 )
 
 cat("\n📊 Data Summary:\n")
-cat("  • Years:", min(data$year), "-", max(data$year), 
+cat("  • Years:", min(data$year), "-", max(data$year),
     glue("({max(data$year) - min(data$year) + 1} years)"), "\n")
 cat("  • Species:", paste(unique(data$species), collapse = ", "), "\n")
 cat("  • Observations:", nrow(data), "\n")
 
-if (CONFIG$spatial$level != "all") {
+if (CONFIG$spatial$level != "system") {
   regions <- unique(data$region)
   cat("  • Regions:", paste(regions, collapse = ", "), "\n")
   cat("  • N regions:", length(regions), "\n")
@@ -252,7 +239,6 @@ cat("\n")
 # =============================================================================
 # PRE-COMPUTE ORDINAL BREAKS (if using fixed breaks)
 # =============================================================================
-
 if (CONFIG$use_ordinal && !CONFIG$sliding_window_breaks) {
   print_section("ORDINAL BREAK CALCULATION")
   
@@ -261,7 +247,7 @@ if (CONFIG$use_ordinal && !CONFIG$sliding_window_breaks) {
   cat("  Break quantiles:", paste(CONFIG$ordinal_breaks, collapse = ", "), "\n\n")
   
   # Check if spatial grouping needed
-  has_regions <- CONFIG$spatial$level != "all" && "region" %in% names(data)
+  has_regions <- CONFIG$spatial$level != "system" && "region" %in% names(data)
   
   if (has_regions) {
     # Breaks by region AND species
@@ -309,7 +295,6 @@ if (CONFIG$use_ordinal && !CONFIG$sliding_window_breaks) {
 # =============================================================================
 # MODEL FITTING FUNCTION (with parallel/cv_windows support)
 # =============================================================================
-
 run_models <- function(data, framework = "mvgam", models_to_run, ...) {
   
   make_forecast_fn <- switch(framework,
@@ -333,14 +318,9 @@ run_models <- function(data, framework = "mvgam", models_to_run, ...) {
   )
 }
 
-
-
-
-
 # =============================================================================
 # RUN FORECASTS
 # =============================================================================
-
 print_banner("MODEL FITTING AND FORECASTING")
 
 results <- list()
@@ -348,12 +328,11 @@ results <- list()
 # Determine if running by region
 run_by_region <- !is.null(CONFIG$spatial$run_by_region) &&
   isTRUE(CONFIG$spatial$run_by_region) &&
-  CONFIG$spatial$level != "all"
+  CONFIG$spatial$level != "system"
 
 # ---------------------------------------------------------------------------
 # OPTION 1: SEPARATE MODELS PER REGION (slower)
 # ---------------------------------------------------------------------------
-
 if (run_by_region) {
   
   # Get unique regions
@@ -516,10 +495,10 @@ if (run_by_region) {
     }
   }
 }
+
 # =============================================================================
 # SAVE RESULTS TO RUN FOLDER
 # =============================================================================
-
 print_section("SAVING RESULTS")
 
 # Save results
@@ -535,7 +514,6 @@ cat("✓ Config saved to:", config_filename, "\n")
 # =============================================================================
 # GENERATE PLOTS (using run folder)
 # =============================================================================
-
 print_section("GENERATING PLOTS")
 
 tryCatch({
@@ -548,14 +526,13 @@ tryCatch({
 # =============================================================================
 # FINAL SUMMARY
 # =============================================================================
-
 print_banner("ANALYSIS COMPLETE")
 
 cat("📂 Run Folder:", run_folder, "\n\n")
 
 cat("📊 Configuration:\n")
 cat("  • Spatial level:", CONFIG$spatial$level, "\n")
-cat("  • Evaluation:", ifelse(CONFIG$use_ordinal, 
+cat("  • Evaluation:", ifelse(CONFIG$use_ordinal,
                               "Numeric + Ordinal (RPS)", "Numeric only (CRPS)"), "\n")
 cat("  • Data type:", CONFIG$data_type, "\n\n")
 
@@ -573,7 +550,7 @@ if (CONFIG$run_mvgam && !is.null(results$mvgam)) {
       arrange(mean_crps) |>
       slice(1)
     
-    cat("  • Best model:", best_model$model, 
+    cat("  • Best model:", best_model$model,
         glue("(CRPS = {round(best_model$mean_crps, 2)})"), "\n")
   }
   cat("\n")
@@ -596,7 +573,6 @@ cat("✅ Analysis complete at:", format(end_time, "%Y-%m-%d %H:%M:%S"), "\n\n")
 # =============================================================================
 # CLEANUP
 # =============================================================================
-
 # Reset to sequential processing (in case parallel was used)
 plan(sequential)
 

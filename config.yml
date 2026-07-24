@@ -8,7 +8,7 @@
 default:
   # Spatial configuration
   spatial:
-    level: subregion                    # "all", "subregion", "colony"
+    level: system                       # "system", "subregion", "colony"
     forecast_totals: false              # species or total
     include_species: "top6"             # "top6", "all", or a list like ["wost", "whib", "anhi"]
     include_unknowns: true              # keeps unkn, smwh, lawh, etc.
@@ -274,7 +274,7 @@ production:
   inherits: default
 
   spatial:
-    level: all
+    level: system
     run_by_region: false
 
   models:
@@ -565,7 +565,7 @@ test_all_models:
   inherits: default
   
   spatial:
-    level: all
+    level: system
     run_by_region: false
   
   models:
@@ -614,7 +614,7 @@ test_all_models:
 quick_test_all:
   inherits: default
   spatial:
-    level: all
+    level: system
     run_by_region: false
   models:
     mvgam:
@@ -666,7 +666,7 @@ quick_test_subregion:
 test_totals:
   # Aggregate all species into Total
   spatial:
-    level: all                      # or "subregion" or "colony"
+    level: system                      # or "subregion" or "colony"
     forecast_totals: true          # ← KEY: This aggregates to Total
     include_species: all        # Species to aggregate (or "all")
     include_unknowns: true        # Include unknowns in total?
@@ -700,7 +700,7 @@ test_totals:
 test_totals_mvgam:
   # Aggregate all species into Total
   spatial:
-    level: all
+    level: system
     forecast_totals: true          # Aggregates to Total
     include_species: all
     include_unknowns: true
