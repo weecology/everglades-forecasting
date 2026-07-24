@@ -11,7 +11,7 @@ fit_mvgam_ar_exog_plus <- function(train_data, test_data, config) {
   } else if (config$family == "gaussian") {
     gaussian()
   } else {
-    NA
+    nb()
   }
   
   

@@ -616,6 +616,7 @@ quick_test_all:
   spatial:
     level: system
     run_by_region: false
+  family: "nb"
   models:
     mvgam:
       - baseline
@@ -624,7 +625,7 @@ quick_test_all:
       - baseline
       - arima
   run_mvgam: true
-  run_fable: true
+  run_fable: false
   chains: 2
   burnin: 500
   samples: 500
@@ -632,7 +633,7 @@ quick_test_all:
   parallel:
     enabled: false
   cache:
-    data: true
+    data: false
     models: false
 
 # Quick test - subregion, mvgam + fable
@@ -658,7 +659,7 @@ quick_test_subregion:
   parallel:
     enabled: false
   cache:
-    data: true
+    data: false
     models: false
     
     
