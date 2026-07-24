@@ -172,7 +172,7 @@ data_subregion <- extract_metrics(completed_folders[["subregion"]], "Region")
 data_colony    <- extract_metrics(completed_folders[["colony"]], "Colony")
 
 # Combine all metrics
-plot_data <- bind_rows(data_colony, data_subregion, data_all)
+plot_data <- bind_rows(data_colony, data_subregion, data_system)
 
 if (nrow(plot_data) == 0) {
   stop("No metric data found across any scale. Did the models fail to fit?")

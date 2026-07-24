@@ -58,7 +58,7 @@ fit_mvgam_trait2 <- function(train_data, test_data, config) {
   } else if (config$family == "nb") {
     nb()
   } else {
-    NA
+    nb()
   }
   
   
