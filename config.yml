@@ -739,14 +739,22 @@ test_totals_mvgam:
     enabled: false     # Disable for easier debugging
     workers: null    
     
+# =============================================================================
+# MODEL-BY-MODEL SCALE COMPARISON (for run_all_scales.R)
+# =============================================================================
+
+# Complete model comparison - all models across all scales
 run_all_scales_all:
   inherits: default
-
+  
   spatial:
-    include_species: "top6"        # Top 6 species
+    level: system                      # Base level (script will override this)
+    include_species: "top6"            # Top 6 species
     include_unknowns: false
     min_years_required: 10
-
+    run_by_region: false               # Hierarchical (faster)
+  
+  # List ALL models you want to test
   models:
     mvgam:
       - baseline
@@ -762,33 +770,72 @@ run_all_scales_all:
       - tslm
       - arima_exog
       - gam
+  
   run_mvgam: true
   run_fable: true
-  # Full MCMC
+  
+  # MCMC settings (balanced for reliability vs speed)
+  family: "poisson"                   # More stable than "nb" for multi-scale
   chains: 4
   burnin: 2000
   samples: 2000
   adapt_delta: 0.99
   max_treedepth: 12
-  # All CV windows
-  cv_windows: null
-  # Full parallel
+  
+  # Cross-validation settings
+  train_years: 20
+  test_years: 2
+  cv_windows: null                    # All windows (or set to e.g., 3 for testing)
+  
+  # Parallel processing
   parallel:
     enabled: true
-    workers: null
+    workers: null                     # Auto-detect cores
+  
   # Caching
   cache:
     data: true
-    models: true
-  # Full evaluation
+    models: false                     # Don't cache models for fresh runs
+  
+  # Evaluation
   use_ordinal: true
-  # All plots
+  ordinal_breaks: [0.33, 0.50, 0.67]
+  sliding_window_breaks: true
+  
+  # Plotting
   plots:
-    skill_over_time: true
-    best_model_counts: true
-    forecast_timeseries: true
-    ts_models: ["baseline", "ar", "trait"]
-    ts_species: ["gbhe", "greg", "rosp", "wost", "whib", "sneg"]
-    
-    
- 
+    forecast_timeseries: false        # Skip for wrapper (too many plots)
+
+# Fast testing version (fewer models, faster MCMC)
+run_all_scales_test:
+  inherits: run_all_scales_all
+  
+  models:
+    mvgam:
+      - baseline
+      - trait                         # Just test these two
+    fable:
+      - baseline
+      - arima
+  
+  chains: 2
+  burnin: 500
+  samples: 500
+  cv_windows: 2                       # Just 2 windows
+  
+  parallel:
+    enabled: false                    # Sequential for debugging
+
+# Production version with all features
+run_all_scales_production:
+  inherits: run_all_scales_all
+  
+  chains: 4
+  burnin: 3000
+  samples: 3000
+  adapt_delta: 0.999
+  
+  cv_windows: null                    # All windows
+  
+  cache:
+    models: true                      # Cache for production
