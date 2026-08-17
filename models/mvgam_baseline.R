@@ -15,14 +15,12 @@ fit_mvgam_baseline <- function(train_data, test_data, config) {
   
   tryCatch({
     model <- mvgam(
-      formula = count ~ 1,           
-      trend_model = RW(),            
-      #trend_model = RW() — This makes it a proper random walk baseline (the time-series equivalent of "just predict tomorrow will be like today")
-      #this might want to be modified? 
+      formula = count ~ 1,
+      trend_model = "None", 
       data = train_data,
       family = model_family,
       noncentred = TRUE,
-      control = list(adapt_delta = 0.99, max_treedepth = 12),   
+      control = list(adapt_delta = 0.99, max_treedepth = 12),
       chains = config$chains,
       burnin = config$burnin,
       samples = config$samples
