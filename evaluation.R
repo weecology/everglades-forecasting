@@ -163,6 +163,8 @@ fit_sliding_window <- function(data, make_forecast, train_years, test_years,
     )
   ))
 }
+
+
 # =============================================================================
 # MVGAM EVALUATION - CENTRALIZED EXTRACTION
 # =============================================================================
