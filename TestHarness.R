@@ -75,9 +75,11 @@ test_single_model <- function(model_name,
                               framework = "mvgam",
                               use_full_data = FALSE) {
   
-  cat(glue("\n{'='*70}\n"))
+
+  
+  cat("\n", paste(rep("=", 70), collapse = ""), "\n", sep = "")
   cat(glue("TESTING: {framework}_{model_name}\n"))
-  cat(glue("{'='*70}\n\n"))
+  cat(paste(rep("=", 70), collapse = ""), "\n\n", sep = "")
   
   # Load data
   cat("Loading data...\n")
@@ -134,9 +136,9 @@ test_single_model <- function(model_name,
   }
   
   # Print results
-  cat("\n{'='*70}\n")
+  cat("\n", paste(rep("=", 70), collapse = ""), "\n", sep = "")
   cat("RESULTS\n")
-  cat("{'='*70}\n\n")
+  cat(paste(rep("=", 70), collapse = ""), "\n\n", sep = "")
   
   cat("Forecasts:", nrow(results$forecasts), "rows\n")
   cat("Metrics:", nrow(results$metrics), "rows\n\n")
@@ -156,9 +158,11 @@ test_single_window <- function(model_name,
                                test_start = 2015,
                                framework = "mvgam") {
   
-  cat(glue("\n{'='*70}\n"))
+
+  
+  cat("\n", paste(rep("=", 70), collapse = ""), "\n", sep = "")
   cat(glue("TESTING SINGLE WINDOW: {train_start}-{test_start-1} → {test_start}\n"))
-  cat(glue("{'='*70}\n\n"))
+  cat(paste(rep("=", 70), collapse = ""), "\n\n", sep = "")
   
   # Load data
   data <- get_wading_bird_data(config = CONFIG, cache = TRUE)
@@ -210,9 +214,11 @@ test_single_window <- function(model_name,
 
 #' Test data loading with different configurations
 test_data_loading <- function() {
-  cat("\n{'='*70}\n")
+ 
+  
+  cat("\n", paste(rep("=", 70), collapse = ""), "\n", sep = "")
   cat("TESTING DATA LOADING\n")
-  cat("{'='*70}\n\n")
+  cat(paste(rep("=", 70), collapse = ""), "\n\n", sep = "")
   
   configs_to_test <- list(
     system = list(level = "system", include_species = "top6"),
@@ -240,6 +246,8 @@ test_data_loading <- function() {
 # =============================================================================
 # EXAMPLE USAGE
 # =============================================================================
+
+# Uncomment the test you want to run:
 
 # Test baseline model quickly
 # test_single_model("baseline", framework = "mvgam", use_full_data = FALSE)
