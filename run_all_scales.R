@@ -231,7 +231,7 @@ for (model_key in names(all_model_results)) {
   }))
   
   if (is.null(model_data) || nrow(model_data) == 0) {
-    cat(glue("  ⚠️  No data for {model_key}\n"))
+    cat(glue("No data for {model_key}\n"))
     next
   }
   
@@ -239,7 +239,7 @@ for (model_key in names(all_model_results)) {
   model_only <- model_data |> filter(model == model_name)
   
   if (nrow(model_only) == 0) {
-    cat(glue("  ⚠️  No results for {model_name}\n"))
+    cat(glue("No results for {model_name}\n"))
     next
   }
   

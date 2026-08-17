@@ -665,6 +665,7 @@ quick_test_subregion:
     
 # Quick test - Total system-wide counts
 test_totals:
+  inherits: default 
   # Aggregate all species into Total
   spatial:
     level: system                      # or "subregion" or "colony"
@@ -775,7 +776,7 @@ run_all_scales_all:
   run_fable: true
   
   # MCMC settings (balanced for reliability vs speed)
-  family: "poisson"                   # More stable than "nb" for multi-scale
+  family: "nb"                  
   chains: 4
   burnin: 2000
   samples: 2000
@@ -839,3 +840,89 @@ run_all_scales_production:
   
   cache:
     models: true                      # Cache for production
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+# =============================================================================
+# STL DECOMPOSITION CONFIGURATION (for exploratory analysis)
+# Seasonal-Trend decomposition using LOESS for birds and/or water covariates
+# Use stl_exploration.R with these profiles
+# =============================================================================
+
+# STL Analysis Configuration
+stl:
+  enabled: true
+  analyze: "birds"              # "birds", "water", or "both"
+  species: null                 # null = all species, or list like ["wost", "whib"]
+  water_vars: null              # null = all water vars, or list like ["init_depth", "breed_season_depth", "recession", "dry_days"] 
+  window: 5                     # LOESS window size
+  output_dir: "results/STL"
+  
+  
+  
+  
+# Analyze only birds (current setup)
+stl_birds_only:
+  inherits: default
+  stl:
+    enabled: true
+    analyze: "birds"
+    species: ["wost", "whib", "greg"]
+
+# Analyze only water
+stl_water_only:
+  inherits: default
+  stl:
+    enabled: true
+    analyze: "water"
+    water_vars: ["init_depth", "breed_season_depth", "recession", "dry_days"] 
+
+# Analyze both
+stl_comprehensive:
+  inherits: default
+  stl:
+    enabled: true
+    analyze: "both"
+    species: null              # All species
+    water_vars: null          # All water variables
+    
+    
+totals_top6:
+  inherits: default
+  
+  spatial:
+    level: system                    # or "subregion" or "colony"
+    forecast_totals: true            # ← Aggregates to Total
+    include_species: "top6"          # Top 6 species only
+    include_unknowns: false          # Exclude unknowns
+  
+  models:
+    mvgam:
+      - baseline
+      - ar
+      - ar_exog
+      - ar_exog_plus
+    fable:
+      - baseline
+      - arima
+      - tslm
+      - arima_exog
+      - gam
+  
+  run_mvgam: true
+  run_fable: true
+  
+  use_ordinal: true
+  train_years: 20
+  test_years: 2

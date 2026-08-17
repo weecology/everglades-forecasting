@@ -77,7 +77,7 @@ if (!exists("CONFIG")) {
 
 # For totals
 if (!is.null(CONFIG$spatial$forecast_totals) && isTRUE(CONFIG$spatial$forecast_totals)) {
-  incompatible_models <- c("species_specific", "trait", "trait2")
+  incompatible_models <- c("species_specific", "trait", "trait2", 'ar')
   
   if (any(incompatible_models %in% CONFIG$models$mvgam)) {
     CONFIG$models$mvgam <- setdiff(CONFIG$models$mvgam, incompatible_models)
