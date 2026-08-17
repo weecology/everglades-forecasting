@@ -6,6 +6,12 @@ library(dplyr)
 library(mvgam)
 library(glue)
 
+# Ensure no parallel processing
+library(future)
+plan(sequential)  
+
+
+
 # Load necessary functions
 source("data_functions.R")
 source("evaluation.R")

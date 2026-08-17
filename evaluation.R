@@ -73,9 +73,76 @@ fit_sliding_window <- function(data, make_forecast, train_years, test_years,
   # Capture extra args for passing to make_fable_evaluation
   dots <- list(...)
   
-  results_list <- furrr::future_map(
-    seq_along(train_starts), 
-    function(i) {
+  # Use conditional execution based on parallel setting
+  if (parallel) {
+    results_list <- furrr::future_map(
+      seq_along(train_starts),
+      function(i) {
+        cat(glue::glue(
+          "Window {i}/{n_windows}: ",
+          "Train {train_starts[i]}-{test_starts[i]-1}, ",
+          "Test {test_starts[i]}-{test_starts[i]+test_years-1}\n"
+        ))
+        
+        train_data <- data |> filter(year >= train_starts[i] & year < test_starts[i])
+        test_data  <- data |> filter(year >= test_starts[i]  & year < test_starts[i] + test_years)
+        
+        # Run forecast function
+        forecast_and_metrics <- tryCatch({
+          make_forecast(train_data, test_data, ...)
+        }, error = function(e) {
+          warning(glue::glue("Window {i} failed: {e$message}"))
+          list(tibble(), tibble())
+        })
+        
+        fc_raw  <- forecast_and_metrics[[1]]
+        met_raw <- forecast_and_metrics[[2]]
+        
+        # FABLE: compute skill scores here
+        is_fable <- inherits(fc_raw, "fable") ||
+          (is.data.frame(fc_raw) && ".model" %in% names(fc_raw) &&
+             "count" %in% names(fc_raw) && inherits(fc_raw$count, "distribution"))
+        
+        if (is_fable && !is.null(met_raw) && nrow(met_raw) > 0) {
+          met_out <- tryCatch({
+            make_fable_evaluation(
+              raw_metrics        = met_raw,
+              forecasts          = fc_raw,
+              test_data          = test_data,
+              train_data         = train_data,
+              config             = CONFIG,
+              precomputed_breaks = dots$precomputed_breaks,
+              use_ordinal        = dots$use_ordinal %||% FALSE
+            ) |>
+              as_tibble() |>
+              mutate(test_start = test_starts[i], window = i)
+          }, error = function(e) {
+            warning(glue::glue("Fable evaluation window {i}: {e$message}"))
+            tibble()
+          })
+        } else {
+          met_out <- tryCatch({
+            met_raw |>
+              as_tibble() |>
+              mutate(test_start = test_starts[i], window = i)
+          }, error = function(e) tibble())
+        }
+        
+        fc_out <- tryCatch({
+          fc_raw |>
+            as_tibble() |>
+            mutate(test_start = test_starts[i], window = i)
+        }, error = function(e) {
+          warning(glue::glue("Could not convert forecasts window {i}: {e$message}"))
+          tibble()
+        })
+        
+        list(forecasts = fc_out, metrics = met_out)
+      },
+      .options = furrr_options(seed = TRUE)
+    )
+  } else {
+    results_list <- lapply(seq_along(train_starts), function(i) {
       cat(glue::glue(
         "Window {i}/{n_windows}: ",
         "Train {train_starts[i]}-{test_starts[i]-1}, ",
@@ -85,7 +152,6 @@ fit_sliding_window <- function(data, make_forecast, train_years, test_years,
       train_data <- data |> filter(year >= train_starts[i] & year < test_starts[i])
       test_data  <- data |> filter(year >= test_starts[i]  & year < test_starts[i] + test_years)
       
-      # Run forecast function
       forecast_and_metrics <- tryCatch({
         make_forecast(train_data, test_data, ...)
       }, error = function(e) {
@@ -96,9 +162,6 @@ fit_sliding_window <- function(data, make_forecast, train_years, test_years,
       fc_raw  <- forecast_and_metrics[[1]]
       met_raw <- forecast_and_metrics[[2]]
       
-      # -----------------------------------------------------------------------
-      # FABLE: compute skill scores here (raw metrics come from fable_models.R)
-      # -----------------------------------------------------------------------
       is_fable <- inherits(fc_raw, "fable") ||
         (is.data.frame(fc_raw) && ".model" %in% names(fc_raw) &&
            "count" %in% names(fc_raw) && inherits(fc_raw$count, "distribution"))
@@ -121,7 +184,6 @@ fit_sliding_window <- function(data, make_forecast, train_years, test_years,
           tibble()
         })
       } else {
-        # mvgam or empty - metrics already computed
         met_out <- tryCatch({
           met_raw |>
             as_tibble() |>
@@ -129,7 +191,6 @@ fit_sliding_window <- function(data, make_forecast, train_years, test_years,
         }, error = function(e) tibble())
       }
       
-      # Safe forecast conversion
       fc_out <- tryCatch({
         fc_raw |>
           as_tibble() |>
@@ -140,9 +201,8 @@ fit_sliding_window <- function(data, make_forecast, train_years, test_years,
       })
       
       list(forecasts = fc_out, metrics = met_out)
-    },
-    .options = furrr_options(seed = TRUE)  # ✅ Added here
-  )
+    })
+  }
   
   cat("\n=== Combining results ===\n")
   
@@ -163,7 +223,6 @@ fit_sliding_window <- function(data, make_forecast, train_years, test_years,
     )
   ))
 }
-
 
 # =============================================================================
 # MVGAM EVALUATION - CENTRALIZED EXTRACTION
@@ -485,6 +544,7 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
   
   all_crps <- bind_rows(lapply(results, function(x) x$crps))
   
+  # ✅ FIXED: Changed underscores to multiplication operators
   expected_n <- length(results) * length(all_series) * n_test_years
   cat(glue::glue("  ✓ Extracted {nrow(all_preds)} predictions\n"))
   cat(glue::glue("  Expected:  {expected_n}\n"))
