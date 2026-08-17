@@ -2,6 +2,7 @@
 # WRAPPER SCRIPT: RUN EACH MODEL SEPARATELY ACROSS ALL SPATIAL SCALES
 # Compares each model individually to baseline across system/subregion/colony
 # =============================================================================
+
 library(config)
 library(dplyr)
 library(ggplot2)
@@ -10,56 +11,100 @@ library(tidyr)
 library(glue)
 
 # =============================================================================
+# CONFIGURATION - EDIT THIS SECTION
+# =============================================================================
+
+# Species to include (examples: c("gbhe", "greg", "rosp") or "top6" or "all")
+SPECIES_TO_RUN <- c("greg")  # Specify individual species
+# SPECIES_TO_RUN <- "top6"           # Or use "top6" for all top 6 species
+# SPECIES_TO_RUN <- "all"            # Or use "all" for all species
+
+# Spatial scales to compare
+SCALES_TO_RUN <- c("system", "subregion")  # Choose from: "system", "subregion", "colony"
+# SCALES_TO_RUN <- c("system", "colony")   # Example: skip subregion
+# SCALES_TO_RUN <- c("colony")             # Example: just colony level
+
+# mvgam models to test (baseline is always included automatically)
+MVGAM_MODELS <- c("ar_exog")  # Choose from: "ar", "ar_exog", "ar_exog_plus", "species_specific", "trait", "trait2"
+# MVGAM_MODELS <- c()                   # Set to empty vector to skip mvgam
+
+# fable models to test (baseline is always included automatically)
+FABLE_MODELS <- c()  # Choose from: "arima", "tslm", "arima_exog", "gam"
+# FABLE_MODELS <- c("arima", "tslm")   # Example: test multiple fable models
+
+# =============================================================================
+# END USER CONFIGURATION
+# =============================================================================
+
+# =============================================================================
 # CREATE TIMESTAMPED SCALE_RUN FOLDER
 # =============================================================================
+
 timestamp <- format(Sys.time(), "%Y%m%d-%H%M")
 scale_run_folder <- file.path("results", paste0("model_scale_run_", timestamp))
-
 dir.create(scale_run_folder, recursive = TRUE, showWarnings = FALSE)
 
 cat("\n")
 cat(paste(rep("=", 80), collapse = ""), "\n")
 cat("MODEL-BY-MODEL SPATIAL SCALE COMPARISON\n")
 cat(paste(rep("=", 80), collapse = ""), "\n")
-cat("📂 Results folder:", scale_run_folder, "\n\n")
+cat("Results folder:", scale_run_folder, "\n\n")
 
 # =============================================================================
-# LOAD BASE CONFIGURATION
+# LOAD BASE CONFIGURATION AND APPLY USER SETTINGS
 # =============================================================================
+
 base_profile <- "run_all_scales_all"
 Sys.setenv(R_CONFIG_ACTIVE = base_profile)
 base_config <- config::get()
 
-# Save the base configuration
+# Override with user-specified species
+base_config$spatial$include_species <- SPECIES_TO_RUN
+
+# Override with user-specified models
+base_config$models$mvgam <- MVGAM_MODELS
+base_config$models$fable <- FABLE_MODELS
+
+# Set framework flags
+base_config$run_mvgam <- length(MVGAM_MODELS) > 0
+base_config$run_fable <- length(FABLE_MODELS) > 0
+
+# Save the configuration
 saveRDS(base_config, file.path(scale_run_folder, "base_config.rds"))
+
+cat("📋 Configuration:\n")
+cat("  • Species:", paste(SPECIES_TO_RUN, collapse = ", "), "\n")
+cat("  • Scales:", paste(SCALES_TO_RUN, collapse = ", "), "\n")
+cat("  • mvgam models:", if(length(MVGAM_MODELS) > 0) paste(MVGAM_MODELS, collapse = ", ") else "none", "\n")
+cat("  • fable models:", if(length(FABLE_MODELS) > 0) paste(FABLE_MODELS, collapse = ", ") else "none", "\n")
 cat("✓ Base configuration saved\n\n")
 
 # =============================================================================
-# MODELS AND SCALES TO RUN
+# BUILD MODEL LIST
 # =============================================================================
-scales_to_run <- c("system", "subregion", "colony")
 
-# Get all models from config (excluding baseline - we'll add it automatically)
-all_mvgam_models <- setdiff(base_config$models$mvgam, "baseline")
-all_fable_models <- setdiff(base_config$models$fable, "baseline")
-
-# Combine into framework-specific lists
 models_to_test <- list()
+
 if (base_config$run_mvgam) {
-  for (m in all_mvgam_models) {
+  for (m in MVGAM_MODELS) {
     models_to_test[[paste0("mvgam_", m)]] <- list(
       framework = "mvgam",
       model = m
     )
   }
 }
+
 if (base_config$run_fable) {
-  for (m in all_fable_models) {
+  for (m in FABLE_MODELS) {
     models_to_test[[paste0("fable_", m)]] <- list(
       framework = "fable",
       model = m
     )
   }
+}
+
+if (length(models_to_test) == 0) {
+  stop("❌ No models specified! Please add models to MVGAM_MODELS or FABLE_MODELS")
 }
 
 cat("📋 Models to test:", length(models_to_test), "\n")
@@ -74,6 +119,7 @@ all_model_results <- list()
 # =============================================================================
 # PART 1: RUN EACH MODEL ACROSS ALL SCALES
 # =============================================================================
+
 for (model_key in names(models_to_test)) {
   
   model_info <- models_to_test[[model_key]]
@@ -93,7 +139,7 @@ for (model_key in names(models_to_test)) {
   model_scale_results <- list()
   
   # Run this model at each scale
-  for (current_scale in scales_to_run) {
+  for (current_scale in SCALES_TO_RUN) {
     
     cat("\n")
     cat(paste(rep("-", 70), collapse = ""), "\n")
@@ -120,6 +166,22 @@ for (model_key in names(models_to_test)) {
       CONFIG$models$mvgam <- c()
       CONFIG$run_mvgam <- FALSE
       CONFIG$run_fable <- TRUE
+    }
+    
+    # Load model functions into global environment
+    if (framework == "mvgam") {
+      model_file <- file.path("models", paste0("mvgam_", model_name, ".R"))
+      if (file.exists(model_file)) {
+        source(model_file, local = FALSE)  # local = FALSE ensures global environment
+        cat(glue("  ✓ Pre-loaded {model_name}\n"))
+      }
+      
+      # Also load baseline
+      baseline_file <- file.path("models", "mvgam_baseline.R")
+      if (file.exists(baseline_file)) {
+        source(baseline_file, local = FALSE)
+        cat("  ✓ Pre-loaded baseline\n")
+      }
     }
     
     # Run the pipeline
@@ -170,6 +232,7 @@ cat("\n✅ ALL MODEL RUNS COMPLETE!\n\n")
 # =============================================================================
 # PART 2: EXTRACT AND COMPARE EACH MODEL TO BASELINE
 # =============================================================================
+
 cat("📊 Extracting and comparing metrics...\n\n")
 
 # Function to extract metrics for a specific model
@@ -185,7 +248,7 @@ extract_model_metrics <- function(folder_path, scale_name, framework) {
     if (is.null(res$mvgam) || is.null(res$mvgam$metrics)) return(NULL)
     
     metrics <- res$mvgam$metrics |>
-      select(model, species, 
+      select(model, species,
              crps_skill,
              any_of(c("rps_skill", "rmse_skill"))) |>
       mutate(
@@ -210,8 +273,9 @@ extract_model_metrics <- function(folder_path, scale_name, framework) {
   return(metrics)
 }
 
-# Scale colors
-scale_colors <- c("colony" = "#00B050", "subregion" = "#FF0000", "system" = "#0000FF")
+# Scale colors (adjust based on which scales are included)
+all_scale_colors <- c("colony" = "#00B050", "subregion" = "#FF0000", "system" = "#0000FF")
+scale_colors <- all_scale_colors[SCALES_TO_RUN]
 
 # Process each model
 for (model_key in names(all_model_results)) {
@@ -253,14 +317,14 @@ for (model_key in names(all_model_results)) {
                  values_to = "skill_score") |>
     filter(!is.na(skill_score)) |>
     mutate(
-      skill_score = pmax(skill_score, -1),  # Winsorize at -1
+      skill_score = pmax(skill_score, -1),
       metric_label = case_when(
         metric == "crps_skill" ~ "CRPS Skill",
         metric == "rps_skill" ~ "RPS Skill",
         metric == "rmse_skill" ~ "RMSE Skill",
         TRUE ~ metric
       ),
-      scale = factor(scale, levels = c("colony", "subregion", "system"))
+      scale = factor(scale, levels = SCALES_TO_RUN)
     )
   
   # ---------------------------------------------------------------------
@@ -354,6 +418,7 @@ for (model_key in names(all_model_results)) {
 # =============================================================================
 # PART 3: GENERATE CROSS-MODEL COMPARISON
 # =============================================================================
+
 cat("\n📊 Generating cross-model comparison...\n")
 
 # Extract all metrics for comparison
@@ -395,11 +460,11 @@ if (!is.null(all_metrics) && nrow(all_metrics) > 0) {
         metric == "rmse_skill" ~ "RMSE Skill",
         TRUE ~ metric
       ),
-      scale = factor(scale, levels = c("colony", "subregion", "system"))
+      scale = factor(scale, levels = SCALES_TO_RUN)
     )
   
   # Plot: Model comparison across scales
-  p_model_comparison <- ggplot(comparison_long, 
+  p_model_comparison <- ggplot(comparison_long,
                                aes(x = model_key, y = skill_score, fill = scale)) +
     geom_hline(yintercept = 0, linetype = "dashed", color = "gray70") +
     geom_boxplot(alpha = 0.7) +
@@ -448,13 +513,12 @@ if (!is.null(all_metrics) && nrow(all_metrics) > 0) {
 # =============================================================================
 # FINAL SUMMARY
 # =============================================================================
+
 cat("\n")
 cat(paste(rep("=", 80), collapse = ""), "\n")
 cat("✅ MODEL-BY-MODEL SPATIAL SCALE COMPARISON COMPLETE\n")
 cat(paste(rep("=", 80), collapse = ""), "\n\n")
-
 cat("📂 All results saved to:", scale_run_folder, "\n\n")
-
 cat("📁 Folder Structure:\n")
 cat("  • base_config.rds - Base configuration used\n")
 cat("  • all_models_comparison.png - Cross-model comparison plot\n")
@@ -462,9 +526,9 @@ cat("  • all_models_summary.csv - Overall performance summary\n\n")
 
 for (model_key in names(all_model_results)) {
   cat(glue("  • {model_key}/\n"))
-  cat(glue("    ├── system/          - System-wide results\n"))
-  cat(glue("    ├── subregion/       - Subregional results\n"))
-  cat(glue("    ├── colony/          - Colony results\n"))
+  for (scale in SCALES_TO_RUN) {
+    cat(glue("    ├── {scale}/\n"))
+  }
   cat(glue("    ├── density_across_scales.png\n"))
   cat(glue("    ├── jitter_across_scales.png\n"))
   cat(glue("    └── summary_statistics.csv\n\n"))
