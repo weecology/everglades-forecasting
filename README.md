@@ -69,7 +69,7 @@ remotes::install_github("hendersontrent/fable.gam") #Fable GAMs
 ├── final_year_plots.R              # Forecast vs actual for latest year
 ├── cache/                          # Auto-generated data/model cache folder
 ├── models/
-│   ├── mvgam_baseline.R           # Baseline random walk model
+│   ├── mvgam_baseline.R           # Baseline longterm average model
 │   ├── mvgam_ar.R                 # AR model with smooth water covariates
 │   ├── mvgam_ar_exog.R            # AR with linear covariates
 │   ├── mvgam_ar_exog_plus.R       # AR with tensor product interactions
