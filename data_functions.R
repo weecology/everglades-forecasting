@@ -172,6 +172,13 @@ get_wading_bird_data <- function(config, path = ".", cache = TRUE) {
     # ==========================================================================
   } else if (level == "subregion") {
     
+    # Apply subregion exclude filter if specified
+    if (!is.null(config$spatial$exclude_regions) &&
+        length(config$spatial$exclude_regions) > 0) {
+      counts <- counts |>
+        filter(!subregion %in% config$spatial$exclude_regions)
+    }
+    
     # Apply include/exclude filters
     if (!is.null(config$spatial$include_regions) &&
         length(config$spatial$include_regions) > 0) {
@@ -237,6 +244,13 @@ get_wading_bird_data <- function(config, path = ".", cache = TRUE) {
         length(config$spatial$exclude_colonies) > 0) {
       counts <- counts |>
         filter(!colony %in% config$spatial$exclude_colonies)
+    }
+    
+    # Apply subregion exclude filter if specified 
+    if (!is.null(config$spatial$exclude_regions) &&
+        length(config$spatial$exclude_regions) > 0) {
+      counts <- counts |>
+        filter(!subregion %in% config$spatial$exclude_regions)
     }
     
     # Apply subregion filter if specified

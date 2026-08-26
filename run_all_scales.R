@@ -15,33 +15,53 @@ library(glue)
 # =============================================================================
 
 # Species to include (examples: c("gbhe", "greg", "rosp") or "top6" or "all")
-SPECIES_TO_RUN <- c("greg")  # Specify individual species
-# SPECIES_TO_RUN <- "top6"           # Or use "top6" for all top 6 species
+#SPECIES_TO_RUN <- c("wost")  # Specify individual species
+ SPECIES_TO_RUN <- "top6"           # Or use "top6" for all top 6 species
 # SPECIES_TO_RUN <- "all"            # Or use "all" for all species
 
+ 
+FORECAST_TOTALS <- TRUE           #TRUE/FALSE
+ 
+ 
 # Spatial scales to compare
 SCALES_TO_RUN <- c("system", "subregion")  # Choose from: "system", "subregion", "colony"
 # SCALES_TO_RUN <- c("system", "colony")   # Example: skip subregion
 # SCALES_TO_RUN <- c("colony")             # Example: just colony level
 
 # mvgam models to test (baseline is always included automatically)
-MVGAM_MODELS <- c("ar_exog")  # Choose from: "ar", "ar_exog", "ar_exog_plus", "species_specific", "trait", "trait2"
-# MVGAM_MODELS <- c()                   # Set to empty vector to skip mvgam
+MVGAM_MODELS <- c("ar", "ar_exog", "ar_exog_plus")  # Choose from: "ar", "ar_exog", "ar_exog_plus", "species_specific", "trait", "trait2"
+#MVGAM_MODELS <- c()                   # Set to empty vector to skip mvgam
+
+
 
 # fable models to test (baseline is always included automatically)
 FABLE_MODELS <- c()  # Choose from: "arima", "tslm", "arima_exog", "gam"
-# FABLE_MODELS <- c("arima", "tslm")   # Example: test multiple fable models
+#FABLE_MODELS <- c( "arima", "tslm", "arima_exog", "gam" )   # Example: test multiple fable models
 
 # =============================================================================
 # END USER CONFIGURATION
 # =============================================================================
-
+CONFIG$parallel$enabled <- TRUE
 # =============================================================================
 # CREATE TIMESTAMPED SCALE_RUN FOLDER
 # =============================================================================
 
 timestamp <- format(Sys.time(), "%Y%m%d-%H%M")
-scale_run_folder <- file.path("results", paste0("model_scale_run_", timestamp))
+# Combine all model names into a single string separated by dashes
+all_models_str <- paste(c(MVGAM_MODELS, FABLE_MODELS), collapse = "-")
+all_scales_str <- paste(SCALES_TO_RUN, collapse = "-")
+# Combine all species names into a single string
+species_str <- paste(SPECIES_TO_RUN, collapse = "-")
+
+# Create the final folder path
+scale_run_folder <- file.path("results",
+                              paste0(species_str,
+                                     "_model_scale_run_",
+                                     all_models_str,
+                                     "_",
+                                     all_scales_str, 
+                                     "-",
+                                     timestamp))
 dir.create(scale_run_folder, recursive = TRUE, showWarnings = FALSE)
 
 cat("\n")
@@ -60,6 +80,8 @@ base_config <- config::get()
 
 # Override with user-specified species
 base_config$spatial$include_species <- SPECIES_TO_RUN
+base_config$spatial$forecast_totals <- FORECAST_TOTALS
+
 
 # Override with user-specified models
 base_config$models$mvgam <- MVGAM_MODELS
@@ -104,7 +126,7 @@ if (base_config$run_fable) {
 }
 
 if (length(models_to_test) == 0) {
-  stop("❌ No models specified! Please add models to MVGAM_MODELS or FABLE_MODELS")
+  stop("!!!! - No models specified! Please add models to MVGAM_MODELS or FABLE_MODELS")
 }
 
 cat("📋 Models to test:", length(models_to_test), "\n")
@@ -186,6 +208,7 @@ for (model_key in names(models_to_test)) {
     
     # Run the pipeline
     tryCatch({
+      CONFIG$parallel$enabled <- FALSE
       source("main.R")
       
       if (exists("run_folder") && !is.null(run_folder)) {
@@ -387,6 +410,35 @@ for (model_key in names(all_model_results)) {
          p_jitter, width = 12, height = 8, dpi = 300)
   
   # ---------------------------------------------------------------------
+  # PLOT 2.5: ECDF plot (Empirical Cumulative Distribution Function)
+  # ---------------------------------------------------------------------
+  p_ecdf <- ggplot(model_long, aes(x = skill_score, color = scale)) +
+    stat_ecdf(linewidth = 1.2) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "gray50", linewidth = 0.5) +
+    facet_wrap(~metric_label, ncol = 1, scales = "free_x") +
+    scale_color_manual(values = scale_colors) +
+    theme_classic(base_size = 14) +
+    labs(
+      title = glue("{model_key} ECDF Across Spatial Scales"),
+      subtitle = "Cumulative probability of skill scores (vs Baseline)",
+      x = "Skill Score (vs Baseline)",
+      y = "Cumulative Probability",
+      color = "Scale"
+    ) + 
+    coord_flip()+
+    theme(
+      legend.position = "bottom",
+      axis.line = element_line(linewidth = 1),
+      strip.background = element_rect(fill = "grey90", color = NA),
+      strip.text = element_text(face = "bold", size = 12),
+      plot.title = element_text(face = "bold", size = 16),
+      plot.subtitle = element_text(size = 12, color = "gray40")
+    )
+  
+  ggsave(file.path(model_folder, "ecdf_across_scales.png"),
+         p_ecdf, width = 10, height = 12, dpi = 300)
+  
+  # ---------------------------------------------------------------------
   # PLOT 3: Summary statistics table
   # ---------------------------------------------------------------------
   summary_stats <- model_long |>
@@ -408,6 +460,7 @@ for (model_key in names(all_model_results)) {
   
   cat(glue("  ✓ Saved: density_across_scales.png\n"))
   cat(glue("  ✓ Saved: jitter_across_scales.png\n"))
+  cat(glue("  ✓ Saved: ecdf_across_scales.png\n"))
   cat(glue("  ✓ Saved: summary_statistics.csv\n"))
   
   # Print summary to console
@@ -530,6 +583,7 @@ for (model_key in names(all_model_results)) {
     cat(glue("    ├── {scale}/\n"))
   }
   cat(glue("    ├── density_across_scales.png\n"))
+  cat(glue("    ├── ecdf_across_scales.png\n"))  
   cat(glue("    ├── jitter_across_scales.png\n"))
   cat(glue("    └── summary_statistics.csv\n\n"))
 }

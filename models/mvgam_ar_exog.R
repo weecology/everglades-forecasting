@@ -1,6 +1,9 @@
 fit_mvgam_ar_exog <- function(train_data, test_data, config) {
   cat("  Fitting AR exog model...\n")
   
+  # =========================================================================
+  # FAMILY
+  # =========================================================================
   
   model_family <- if (is.null(config$family)) {
     NA
@@ -14,29 +17,43 @@ fit_mvgam_ar_exog <- function(train_data, test_data, config) {
     nb()
   }
   
+  # =========================================================================
+  # GUARD: ensure series factor levels are consistent
+  # =========================================================================
+  
+  if (!is.null(train_data$series) && !is.null(test_data$series)) {
+    all_levels <- union(levels(train_data$series), levels(test_data$series))
+    train_data$series <- factor(train_data$series, levels = all_levels)
+    test_data$series  <- factor(test_data$series,  levels = all_levels)
+  }
+  
+  # =========================================================================
+  # FIT
+  # =========================================================================
   
   tryCatch({
     model <- mvgam(
-      formula = count ~ 1,
+      formula       = count ~ 1,
       trend_formula = ~ breed_season_depth + I(breed_season_depth^2) +
         recession + dry_days,
-      trend_model = mvgam::AR(p = 1),
-      data = train_data,
-      family = model_family,
-      noncentred = TRUE,
-      control = list(adapt_delta = 0.99, max_treedepth = 12),
-      chains = config$chains,
-      burnin = config$burnin,
-      samples = config$samples
+      trend_model   = mvgam::AR(p = 1),
+      data          = train_data,
+      family        = model_family,
+      noncentred    = TRUE,
+      control       = list(adapt_delta = 0.99, max_treedepth = 12),
+      chains        = config$chains,
+      burnin        = config$burnin,
+      samples       = config$samples
     )
     
-    fc <- forecast(model, newdata = test_data)
+    fc   <- forecast(model, newdata = test_data)
     crps <- extract_crps_mvgam(fc, model_name = "ar_exog")
     
     return(list(fc = fc, crps = crps))
     
   }, error = function(e) {
     cat("  ✗ AR exog model failed\n")
+    cat(glue::glue("    Error: {e$message}\n"))
     warning("AR exog model failed: ", e$message)
     return(NULL)
   })
