@@ -361,9 +361,22 @@ if (run_by_region) {
     
     # Subset data for this region
     data_region <- data |> filter(region == reg)
+    
+    all_series <- unique(data_region$species)
+    min_year   <- min(data_region$year)
+    
+    data_region <- data_region |>
+      mutate(
+        time   = as.integer(year - min_year + 1),
+        series = factor(species, levels = all_series)
+      ) |>
+      as.data.frame()
+    
+    
     cat("  • Years:", min(data_region$year), "-", max(data_region$year), "\n")
     cat("  • Observations:", nrow(data_region), "\n")
     cat("  • Species:", paste(unique(data_region$species), collapse = ", "), "\n\n")
+    
     
     # Compute region-specific ordinal breaks if needed
     if (CONFIG$use_ordinal && !CONFIG$sliding_window_breaks) {
