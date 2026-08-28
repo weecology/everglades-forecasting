@@ -39,9 +39,11 @@ FABLE_MODELS <- c()  # Choose from: "arima", "tslm", "arima_exog", "gam"
 #FABLE_MODELS <- c( "arima", "tslm", "arima_exog", "gam" )   # Example: test multiple fable models
 
 # =============================================================================
-# END USER CONFIGURATION
+# PARALLEL PROCESSING
 # =============================================================================
-CONFIG$parallel$enabled <- TRUE
+#CONFIG$parallel$enabled <- TRUE
+
+
 # =============================================================================
 # CREATE TIMESTAMPED SCALE_RUN FOLDER
 # =============================================================================
@@ -175,6 +177,8 @@ for (model_key in names(models_to_test)) {
     # Set run_by_region
     if (current_scale == "system") {
       CONFIG$spatial$run_by_region <- FALSE
+    } else if (current_scale == "subregion") {
+      CONFIG$spatial$run_by_region <- TRUE  
     }
     
     # Configure to run only baseline + this model
@@ -209,6 +213,7 @@ for (model_key in names(models_to_test)) {
     # Run the pipeline
     tryCatch({
       CONFIG$parallel$enabled <- FALSE
+      CONFIG$.skip_config_init <- TRUE
       source("main.R")
       
       if (exists("run_folder") && !is.null(run_folder)) {
@@ -302,6 +307,8 @@ scale_colors <- all_scale_colors[SCALES_TO_RUN]
 
 # Process each model
 for (model_key in names(all_model_results)) {
+  
+  model_folder <- file.path(scale_run_folder, model_key)
   
   model_info <- models_to_test[[model_key]]
   framework <- model_info$framework

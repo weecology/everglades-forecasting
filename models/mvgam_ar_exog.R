@@ -18,6 +18,29 @@ fit_mvgam_ar_exog <- function(train_data, test_data, config) {
   }
   
   # =========================================================================
+  # SCALE COVARIATES using training data statistics
+  # =========================================================================
+  
+  covars <- c("breed_season_depth", "recession", "dry_days")
+  
+  scale_params <- lapply(covars, function(v) {
+    list(mean = mean(train_data[[v]], na.rm = TRUE),
+         sd   = sd(train_data[[v]],   na.rm = TRUE))
+  })
+  names(scale_params) <- covars
+  
+  scale_df <- function(df) {
+    for (v in covars) {
+      s <- scale_params[[v]]
+      df[[v]] <- if (s$sd > 0) (df[[v]] - s$mean) / s$sd else df[[v]] - s$mean
+    }
+    df
+  }
+  
+  train_data <- scale_df(train_data)
+  test_data  <- scale_df(test_data)
+  
+  # =========================================================================
   # GUARD: ensure series factor levels are consistent
   # =========================================================================
   

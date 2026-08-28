@@ -28,12 +28,12 @@ source("evaluation.R")
 TEST_CONFIG <- list(
   # Data settings
   spatial = list(
-    level = "colony",  # "system", "subregion", "colony"
+    level = "subregion",  # "system", "subregion", "colony"
     include_species = c('all'),  # Just 2 species for speed
     include_unknowns = FALSE,
     forecast_totals = TRUE,
     run_by_region = FALSE, 
-    exclude_regions = c("bigcypress", "coastal")   #dont have water data for these yet... 
+    exclude_regions = c("bigcypress", "coastal")   #don't have water data for these yet... 
   ),
   
   # Minimal MCMC for fast testing

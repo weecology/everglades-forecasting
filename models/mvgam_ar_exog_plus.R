@@ -18,6 +18,44 @@ fit_mvgam_ar_exog_plus <- function(train_data, test_data, config) {
   }
   
   # =========================================================================
+  # GUARD: missing covariates (e.g. init_depth absent at system scale)
+  # =========================================================================
+  
+  required_covars <- c("breed_season_depth", "dry_days", "recession", "init_depth")
+  missing_covars  <- setdiff(required_covars, names(train_data))
+  
+  if (length(missing_covars) > 0) {
+    warning(glue::glue(
+      "AR exog plus: missing covariates [{paste(missing_covars, collapse = ', ')}] ",
+      "— skipping model for this scale/window."
+    ))
+    return(NULL)
+  }
+  
+  # =========================================================================
+  # SCALE COVARIATES using training data statistics
+  # =========================================================================
+  
+  covars <- required_covars
+  
+  scale_params <- lapply(covars, function(v) {
+    list(mean = mean(train_data[[v]], na.rm = TRUE),
+         sd   = sd(train_data[[v]],   na.rm = TRUE))
+  })
+  names(scale_params) <- covars
+  
+  scale_df <- function(df) {
+    for (v in covars) {
+      s <- scale_params[[v]]
+      df[[v]] <- if (s$sd > 0) (df[[v]] - s$mean) / s$sd else df[[v]] - s$mean
+    }
+    df
+  }
+  
+  train_data <- scale_df(train_data)
+  test_data  <- scale_df(test_data)
+  
+  # =========================================================================
   # GUARD: ensure series factor levels are consistent
   # =========================================================================
   
@@ -36,15 +74,14 @@ fit_mvgam_ar_exog_plus <- function(train_data, test_data, config) {
     max(k_min, min(k_desired, n_unique - 1))
   }
   
-  k_depth    <- safe_k("breed_season_depth", 8)
-  k_dry      <- safe_k("dry_days",           8)
-  k_recession <- safe_k("recession",         6)
-  k_init     <- safe_k("init_depth",         8)
-  k_ti       <- max(3, min(5, k_depth - 1))
+  k_depth     <- safe_k("breed_season_depth", 8)
+  k_dry       <- safe_k("dry_days",           8)
+  k_recession <- safe_k("recession",          6)
+  k_init      <- safe_k("init_depth",         8)
+  k_ti        <- max(3, min(5, k_depth - 1))
   
   cat(glue::glue("    Adaptive k: depth={k_depth}, dry={k_dry}, recession={k_recession}, init={k_init}, ti={k_ti}\n"))
   
-  # Bake the numeric k values directly into the formula expression
   trend_form <- bquote(~
                          s(breed_season_depth, bs = 'cr', k = .(k_depth)) +
                          s(dry_days,           bs = 'cr', k = .(k_dry)) +
