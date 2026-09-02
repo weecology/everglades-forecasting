@@ -303,7 +303,8 @@ if (CONFIG$use_ordinal && !CONFIG$sliding_window_breaks) {
 # =============================================================================
 # MODEL FITTING FUNCTION (with parallel/cv_windows support)
 # =============================================================================
-run_models <- function(data, framework = "mvgam", models_to_run, ...) {
+run_models <- function(data, framework = "mvgam", models_to_run, 
+                       precomputed_breaks = NULL, ...) {
   
   make_forecast_fn <- switch(framework,
                              "mvgam" = make_mvgam_forecasts,
@@ -325,6 +326,7 @@ run_models <- function(data, framework = "mvgam", models_to_run, ...) {
     ...
   )
 }
+
 
 # =============================================================================
 # RUN FORECASTS
@@ -490,7 +492,8 @@ if (run_by_region) {
     results$mvgam <- run_models(
       data = data,
       framework = "mvgam",
-      models_to_run = CONFIG$models$mvgam
+      models_to_run = CONFIG$models$mvgam,
+      precomputed_breaks = precomputed_breaks 
     )
     
     if (!is.null(results$mvgam)) {
@@ -507,7 +510,8 @@ if (run_by_region) {
     results$fable <- run_models(
       data = data,
       framework = "fable",
-      models_to_run = CONFIG$models$fable
+      models_to_run = CONFIG$models$fable,
+      precomputed_breaks = precomputed_breaks 
     )
     
     if (!is.null(results$fable)) {

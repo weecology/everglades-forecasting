@@ -84,6 +84,8 @@ fit_sliding_window <- function(data, make_forecast, train_years, test_years,
       make_forecast(train_data, test_data, ...)
     }, error = function(e) {
       warning(glue::glue("Window {i} failed: {e$message}"))
+      message("FULL ERROR: ", conditionMessage(e))  
+      traceback()                                    
       list(tibble(), tibble())
     })
     
