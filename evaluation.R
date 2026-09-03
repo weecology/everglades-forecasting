@@ -1,8 +1,10 @@
 # =============================================================================
 # EVALUATION.R - Cross-validation and forecast evaluation
 # Handles both system-wide (species only) and subregional (species x region)
+# Handles both species-level and total count forecasting modes
 # Consistent evaluation for both mvgam and fable frameworks
 # =============================================================================
+
 library(dplyr)
 library(tidyr)
 library(verification)
@@ -84,8 +86,7 @@ fit_sliding_window <- function(data, make_forecast, train_years, test_years,
       make_forecast(train_data, test_data, ...)
     }, error = function(e) {
       warning(glue::glue("Window {i} failed: {e$message}"))
-      message("FULL ERROR: ", conditionMessage(e))  
-      traceback()                                    
+      message("FULL ERROR: ", conditionMessage(e))
       list(tibble(), tibble())
     })
     
@@ -167,6 +168,20 @@ fit_sliding_window <- function(data, make_forecast, train_years, test_years,
 # MVGAM EVALUATION - CENTRALIZED EXTRACTION
 # =============================================================================
 
+# -----------------------------------------------------------------------------
+# FIX 1 (Copilot): Replace quadratic outer() CRPS with O(n log n) sorted-sample
+# energy score identity. Avoids allocating n_samples x n_samples matrix per
+# timepoint per series per window.
+# -----------------------------------------------------------------------------
+
+crps_energy <- function(samples, y) {
+  s <- sort(as.numeric(samples))
+  n <- length(s)
+  # Energy score identity: E|S-y| - 0.5*E|S-S'|
+  # = mean(|s-y|) - sum((2i - n - 1) * s[i]) / n^2
+  mean(abs(s - y)) - sum((2 * seq_len(n) - n - 1) * s) / (n^2)
+}
+
 #' Extract CRPS scores from mvgam forecast object
 extract_crps_mvgam <- function(forecast_obj, model_name) {
   
@@ -203,7 +218,7 @@ extract_crps_mvgam <- function(forecast_obj, model_name) {
     }
   }
   
-  # score() failed — manually compute CRPS from posterior draw matrices
+  # score() failed — manually compute CRPS using efficient energy score identity
   cat("    ℹ Using manual CRPS for single series\n")
   
   series_names <- levels(forecast_obj$series_names)
@@ -213,27 +228,25 @@ extract_crps_mvgam <- function(forecast_obj, model_name) {
     fc_samples <- forecast_obj$forecasts[[sname]]
     obs        <- forecast_obj$test_observations[[sname]]
     
-    # Normalise to matrix [n_samples × n_timepoints]
+    # Normalise to matrix [n_samples x n_timepoints]
     if (is.vector(fc_samples) && !is.matrix(fc_samples)) {
       fc_samples <- matrix(fc_samples, ncol = 1)
     }
     if (is.matrix(fc_samples) && nrow(fc_samples) == 1 && length(obs) > 1) {
-      # Transposed — flip so rows = samples, cols = timepoints
       fc_samples <- t(fc_samples)
     }
     
     obs <- as.numeric(obs)
     n_t <- length(obs)
     
-    # Trim columns to match obs length (handles padding shim in model files)
+    # Trim columns to match obs length
     if (ncol(fc_samples) > n_t) {
       fc_samples <- fc_samples[, seq_len(n_t), drop = FALSE]
     }
     
+    # FIX 1: use crps_energy() instead of outer()
     crps_vals <- sapply(seq_len(n_t), function(t) {
-      s <- fc_samples[, t]
-      y <- obs[t]
-      mean(abs(s - y)) - 0.5 * mean(abs(outer(s, s, "-")))
+      crps_energy(fc_samples[, t], obs[t])
     })
     
     data.frame(
@@ -323,7 +336,7 @@ calculate_rps_mvgam <- function(predictions, test_data, train_data, config,
         
         obs_cat  <- obs_filtered |> pull(count_category) |> as.numeric()
         prob_mat <- pick(prob_low, prob_medium, prob_high, prob_very_high) |>
-          as.matrix()
+          base::as.matrix()
         
         mean(rps(obs_cat, prob_mat)$rps, na.rm = TRUE)
       },
@@ -441,14 +454,11 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
   cat(glue::glue("  N series: {length(all_series)}\n"))
   
   # =========================================================================
-  # YEAR MAPPING: time integer → calendar year, one row per series × timepoint
-  # Used to recover `year` from summary(fc) which only has `time`
+  # YEAR MAPPING: time integer → calendar year
   # =========================================================================
   
   n_test_years <- length(unique(test_data$year))
   
-  # Build a time→year lookup from test_data directly
-  # (works for both 1 and many test years, and doesn't assume time=1,2,...)
   if (has_region) {
     time_to_year <- test_data |>
       as_tibble() |>
@@ -512,7 +522,6 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
     result <- results[[model_name]]
     if (is.null(result$fc)) return(tibble())
     
-    # summary() may return a list for edge cases — coerce safely
     fc_summary <- tryCatch({
       s <- summary(result$fc)
       if (is.list(s) && !is.data.frame(s)) s <- bind_rows(s)
@@ -524,7 +533,6 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
     
     if (nrow(fc_summary) == 0) return(tibble())
     
-    # Keep only real test timepoints (drop any padding rows added by model files)
     real_times <- sort(unique(test_data$time))
     
     fc_only <- fc_summary |>
@@ -534,7 +542,6 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
       slice(seq_len(min(n(), n_test_years))) |>
       ungroup()
     
-    # Recover calendar year via series_id + time join
     fc_out <- fc_only |>
       rename(
         Estimate = predQ50,
@@ -562,7 +569,6 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
   
   all_crps <- bind_rows(lapply(results, function(x) x$crps))
   
- 
   expected_n <- length(results) * length(all_series) * n_test_years
   cat(glue::glue("  ✓ Extracted {nrow(all_preds)} predictions\n"))
   cat(glue::glue("  Expected:  {expected_n}\n"))
@@ -833,6 +839,22 @@ filter_ordinal_years <- function(df, ordinal_years) {
       filter(year >= max(year, na.rm = TRUE) - n_years + 1)
   }
   df
+}
+
+# -----------------------------------------------------------------------------
+# FIX 3 (Copilot): Guard for CONFIG skip flag.
+# Call this at the top of main.R to prevent config::get() from overwriting
+# the per-scale CONFIG built in run_all_scales.R.
+#
+# Usage in main.R:
+#   guard_config_init()
+# -----------------------------------------------------------------------------
+
+guard_config_init <- function() {
+  if (!isTRUE(CONFIG$.skip_config_init)) {
+    Sys.setenv(R_CONFIG_ACTIVE = base_profile)
+    CONFIG <<- config::get()
+  }
 }
 
 #' Print cross-validation summary

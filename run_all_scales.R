@@ -2,7 +2,10 @@
 # WRAPPER SCRIPT: RUN EACH MODEL SEPARATELY ACROSS ALL SPATIAL SCALES
 # Compares each model individually to baseline across system/subregion/colony
 # Computes per-window skill delta: skill_system_t - skill_subregion_t
-# Works for both species-level and total counts
+# Works for both species-level and total count forecasting modes
+# Copilot fixes:
+#   - FIX 1: Redundant pmax() floor applied only once in window_long
+#   - FIX 2: CONFIG$.skip_config_init explicitly guarded via guard_config_init()
 # =============================================================================
 
 library(config)
@@ -20,10 +23,12 @@ library(glue)
 SPECIES_TO_RUN <- "top6"
 # SPECIES_TO_RUN <- "all"
 
-FORECAST_TOTALS <- FALSE           # TRUE/FALSE
+FORECAST_TOTALS <- TRUE           # TRUE/FALSE
 
 # Spatial scales to compare
 SCALES_TO_RUN <- c("system", "subregion")  # "system", "subregion", "colony"
+# SCALES_TO_RUN <- c("system", "colony")
+# SCALES_TO_RUN <- c("colony")
 
 # mvgam models to test (baseline always included automatically)
 #MVGAM_MODELS <- c("ar", "ar_exog", "ar_exog_plus")
@@ -77,11 +82,11 @@ base_config$run_fable               <- length(FABLE_MODELS) > 0
 saveRDS(base_config, file.path(scale_run_folder, "base_config.rds"))
 
 cat("📋 Configuration:\n")
-cat("  • Species:",        paste(SPECIES_TO_RUN, collapse = ", "), "\n")
+cat("  • Species:",         paste(SPECIES_TO_RUN, collapse = ", "), "\n")
 cat("  • Forecast totals:", FORECAST_TOTALS, "\n")
-cat("  • Scales:",         paste(SCALES_TO_RUN, collapse = ", "), "\n")
-cat("  • mvgam models:",   if (length(MVGAM_MODELS) > 0) paste(MVGAM_MODELS, collapse = ", ") else "none", "\n")
-cat("  • fable models:",   if (length(FABLE_MODELS) > 0) paste(FABLE_MODELS, collapse = ", ") else "none", "\n")
+cat("  • Scales:",          paste(SCALES_TO_RUN,  collapse = ", "), "\n")
+cat("  • mvgam models:",    if (length(MVGAM_MODELS) > 0) paste(MVGAM_MODELS, collapse = ", ") else "none", "\n")
+cat("  • fable models:",    if (length(FABLE_MODELS) > 0) paste(FABLE_MODELS, collapse = ", ") else "none", "\n")
 cat("✓ Base configuration saved\n\n")
 
 # =============================================================================
@@ -139,9 +144,15 @@ for (model_key in names(models_to_test)) {
     cat(glue("  Scale: {toupper(current_scale)}"), "\n")
     cat(paste(rep("-", 70), collapse = ""), "\n\n")
     
+    # Build per-scale CONFIG from base — prevents main.R overwriting it
     CONFIG                       <- base_config
     CONFIG$spatial$level         <- current_scale
     CONFIG$spatial$run_by_region <- current_scale != "system"
+    
+    # FIX 2 (Copilot): explicitly flag to guard against config::get() re-init in main.R
+    # main.R must call guard_config_init() (defined in evaluation.R) at its top
+    CONFIG$.skip_config_init <- TRUE
+    CONFIG$parallel$enabled  <- FALSE
     
     if (framework == "mvgam") {
       CONFIG$models$mvgam <- c("baseline", model_name)
@@ -155,6 +166,7 @@ for (model_key in names(models_to_test)) {
       CONFIG$run_fable    <- TRUE
     }
     
+    # Pre-load model functions into global environment
     if (framework == "mvgam") {
       model_file <- file.path("models", paste0("mvgam_", model_name, ".R"))
       if (file.exists(model_file)) {
@@ -169,8 +181,6 @@ for (model_key in names(models_to_test)) {
     }
     
     tryCatch({
-      CONFIG$parallel$enabled  <- FALSE
-      CONFIG$.skip_config_init <- TRUE
       source("main.R")
       
       if (exists("run_folder") && !is.null(run_folder)) {
@@ -208,13 +218,14 @@ cat("\n✅ ALL MODEL RUNS COMPLETE!\n\n")
 
 # =============================================================================
 # PART 2: EXTRACT PER-WINDOW SKILL AND COMPUTE SCALE DELTAS
+# delta_skill = skill_system_t - skill_subregion_t
+# Works for both FORECAST_TOTALS = TRUE and FALSE
 # =============================================================================
 
 cat("📊 Extracting per-window skill scores and computing scale deltas...\n\n")
 
 # -----------------------------------------------------------------------------
 # HELPER: extract window-level metrics from a results folder
-# Works for both species and totals mode
 # -----------------------------------------------------------------------------
 
 extract_model_metrics <- function(folder_path, scale_name, framework) {
@@ -237,7 +248,6 @@ extract_model_metrics <- function(folder_path, scale_name, framework) {
     return(NULL)
   }
   
-  # Select columns that exist — handles both species and totals layouts
   metrics |>
     as_tibble() |>
     select(
@@ -249,16 +259,6 @@ extract_model_metrics <- function(folder_path, scale_name, framework) {
     ) |>
     mutate(framework = framework, scale = scale_name)
 }
-
-# -----------------------------------------------------------------------------
-# Determine grouping keys based on FORECAST_TOTALS flag
-# -----------------------------------------------------------------------------
-
-# species_col: what the entity column is called in this run
-species_col <- if (FORECAST_TOTALS) NULL else "species"
-
-# base id columns used for delta pivot (no region — we average across regions)
-base_id_cols <- c("model_key", species_col, "window", "test_start", "metric", "metric_label")
 
 # -----------------------------------------------------------------------------
 # Collect window-level metrics across all models and scales
@@ -292,7 +292,7 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
     names(all_window_metrics)
   )
   
-  # Pivot to long format
+  # FIX 1 (Copilot): pmax floor applied exactly once here, not repeated downstream
   window_long <- all_window_metrics |>
     pivot_longer(
       cols      = all_of(skill_metrics),
@@ -342,10 +342,7 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
       next
     }
     
-    # -------------------------------------------------------------------------
-    # Label for faceting: species name or "Total"
-    # -------------------------------------------------------------------------
-    
+    # Add entity label: species name or "Total"
     if (!FORECAST_TOTALS && "species" %in% names(model_long)) {
       model_long <- model_long |> mutate(entity = species)
     } else {
@@ -386,23 +383,22 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
     ggsave(file.path(model_folder, "window_skill_by_scale.png"),
            p_window,
            width  = max(10, length(unique(model_long$window)) * 0.5),
-           height = max(6, length(unique(model_long$entity)) * 2.5),
+           height = max(6,  length(unique(model_long$entity)) * 2.5),
            dpi    = 300)
     cat(glue("  ✓ Saved: {mk}/window_skill_by_scale.png\n"))
     
     # -------------------------------------------------------------------------
     # DELTA: system - subregion per window
-    # Only compute if both scales are present for this model
     # -------------------------------------------------------------------------
     
-    available_scales <- unique(model_long$scale)
+    available_scales <- as.character(unique(model_long$scale))
     
-    if (!all(c("system", "subregion") %in% as.character(available_scales))) {
+    if (!all(c("system", "subregion") %in% available_scales)) {
       cat(glue("  ⚠ Both system and subregion needed for delta — skipping {mk}.\n"))
       next
     }
     
-    # Build id cols dynamically: drop columns that don't exist in model_long
+    # Build id cols — exclude region (averaged out below), no pmax re-applied
     delta_id_cols <- intersect(
       c("model_key",
         if (!FORECAST_TOTALS) "species",
@@ -410,8 +406,7 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
       names(model_long)
     )
     
-    # Average across regions first (subregion has one row per region)
-    # so both scales end up as one row per (entity x window x metric)
+    # Average across regions first so subregion has one row per (entity x window x metric)
     delta_df <- model_long |>
       filter(scale %in% c("system", "subregion")) |>
       group_by(across(all_of(delta_id_cols)), scale) |>
@@ -420,7 +415,7 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
         id_cols     = all_of(delta_id_cols),
         names_from  = scale,
         values_from = skill_score,
-        values_fn   = mean        # safety net for any residual duplicates
+        values_fn   = mean       # safety net for any residual duplicates
       ) |>
       filter(!is.na(system), !is.na(subregion)) |>
       mutate(
@@ -438,7 +433,7 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
              "metrics: {paste(unique(delta_df$metric_label), collapse=', ')}\n"))
     
     # -------------------------------------------------------------------------
-    # PLOT B: Delta per window, faceted by metric x entity
+    # PLOT B: Delta per window, faceted by entity
     # -------------------------------------------------------------------------
     
     p_delta <- ggplot(delta_df,
@@ -453,7 +448,7 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
       theme_classic(base_size = 12) +
       labs(
         title    = glue("{mk}: Skill Delta per Window (System − Subregion)"),
-        subtitle = "Positive = system scale outperforms subregion | Negative = subregion wins",
+        subtitle = "Positive = system outperforms subregion | Negative = subregion wins",
         x        = "CV Window (t)",
         y        = "Δ Skill Score (system − subregion)",
         color    = "Metric"
@@ -475,7 +470,6 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
            dpi    = 300)
     cat(glue("  ✓ Saved: {mk}/window_delta_skill.png\n"))
     
-    # Save per-model delta table
     write.csv(delta_df,
               file.path(model_folder, "window_delta_skill.csv"),
               row.names = FALSE)
@@ -497,6 +491,7 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
       names(window_long)
     )
     
+    # Average across regions, no pmax re-applied (already done in window_long)
     cross_delta <- window_long |>
       filter(scale %in% c("system", "subregion")) |>
       group_by(across(all_of(cross_id_cols)), scale) |>
@@ -515,7 +510,6 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
     
     if (nrow(cross_delta) > 0) {
       
-      # Add entity label
       if (!FORECAST_TOTALS && "species" %in% names(cross_delta)) {
         cross_delta <- cross_delta |> mutate(entity = species)
       } else {
