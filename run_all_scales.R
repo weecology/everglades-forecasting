@@ -681,6 +681,9 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
            p_delta_violin, width = 12, height = 10, dpi = 300)
     cat("  ✓ Saved: all_models_delta_violin.png\n")
   }
+  
+  
+  
   # ===========================================================================
   # PART 3: AGGREGATED CROSS-MODEL SUMMARY (across windows)
   # ===========================================================================

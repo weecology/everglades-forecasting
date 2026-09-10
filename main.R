@@ -202,10 +202,20 @@ if (length(stale_xt) > 0) {
   file.remove(stale_xt)
 }
 
-# Ensure wader data directory exists
-if (!dir.exists("SiteandMethods")) {
+# Download wader data only if missing or older than 1 week
+needs_download <- !dir.exists("SiteandMethods") || {
+  stamp <- file.info("SiteandMethods")$mtime
+  is.na(stamp) || difftime(Sys.time(), stamp, units = "days") > 7
+}
+
+if (needs_download) {
   cat("Downloading wader observation data...\n")
   download_observations(".")
+} else {
+  age_days <- round(as.numeric(difftime(Sys.time(),
+                                        file.info("SiteandMethods")$mtime,
+                                        units = "days")), 1)
+  cat("✓ Wader data is current (", age_days, "days old) — skipping download\n")
 }
 
 # Create cache directory if needed
