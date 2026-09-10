@@ -477,8 +477,13 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
   }
   
   # ===========================================================================
-  # CROSS-MODEL delta plot (all models on one figure)
+  # CROSS-MODEL DELTA PLOTS: Density, ECDF, Violin
+  # Uses cross_delta — already computed above
+  # x-axis = delta_skill (positive = system better, negative = subregion better)
+  # each model = one line/fill (density + ECDF) or one violin
   # ===========================================================================
+  
+  
   
   if (all(c("system", "subregion") %in% SCALES_TO_RUN)) {
     
@@ -556,6 +561,126 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
     }
   }
   
+  
+  # ===========================================================================
+  # CROSS-MODEL DELTA PLOTS: Density, ECDF, Violin
+  # Uses cross_delta — already computed above
+  # x-axis = delta_skill (positive = system better, negative = subregion better)
+  # each model = one line/fill (density + ECDF) or one violin
+  # ===========================================================================
+  
+  if (nrow(cross_delta) > 0) {
+    
+    # -------------------------------------------------------------------------
+    # PLOT 1: Density — delta_skill on x, one line per model, faceted by metric
+    # -------------------------------------------------------------------------
+    
+    p_delta_density <- ggplot(cross_delta,
+                              aes(x = delta_skill, fill = model_key, color = model_key)) +
+      geom_density(alpha = 0.15, linewidth = 1.1) +
+      geom_vline(xintercept = 0, linetype = "dashed", color = "gray40", linewidth = 0.7) +
+      annotate("text", x = -0.05, y = Inf, label = "← Subregion better",
+               hjust = 1, vjust = 1.5, size = 3.5, color = "gray40") +
+      annotate("text", x =  0.05, y = Inf, label = "System better →",
+               hjust = 0, vjust = 1.5, size = 3.5, color = "gray40") +
+      facet_wrap(~metric_label, ncol = 1, scales = "free_y") +
+      scale_fill_brewer(palette  = "Dark2") +
+      scale_color_brewer(palette = "Dark2") +
+      theme_classic(base_size = 13) +
+      labs(
+        title    = "All Models: Distribution of Skill Delta",
+        subtitle = "System − Subregion | Positive = system wins | Negative = subregion wins",
+        x        = "Δ Skill Score (system − subregion)",
+        y        = "Density",
+        fill     = "Model",
+        color    = "Model"
+      ) +
+      theme(
+        legend.position  = "bottom",
+        axis.line        = element_line(linewidth = 1),
+        strip.background = element_rect(fill = "grey90", color = NA),
+        strip.text       = element_text(face = "bold", size = 11),
+        plot.title       = element_text(face = "bold", size = 14),
+        plot.subtitle    = element_text(size = 11, color = "gray40")
+      )
+    
+    ggsave(file.path(scale_run_folder, "all_models_delta_density.png"),
+           p_delta_density, width = 10, height = 10, dpi = 300)
+    cat("  ✓ Saved: all_models_delta_density.png\n")
+    
+    # -------------------------------------------------------------------------
+    # PLOT 2: ECDF — delta_skill on x (coord_flip mirrors your existing ECDF [1]),
+    # one line per model, faceted by metric
+    # -------------------------------------------------------------------------
+    
+    p_delta_ecdf <- ggplot(cross_delta,
+                           aes(x = delta_skill, color = model_key)) +
+      stat_ecdf(linewidth = 1.2) +
+      geom_vline(xintercept = 0, linetype = "dashed", color = "gray40", linewidth = 0.7) +
+      annotate("text", x = -0.05, y = 0.5, label = "← Subregion better",
+               hjust = 1, size = 3.5, color = "gray40") +
+      annotate("text", x =  0.05, y = 0.5, label = "System better →",
+               hjust = 0, size = 3.5, color = "gray40") +
+      facet_wrap(~metric_label, ncol = 1, scales = "free_x") +
+      scale_color_brewer(palette = "Dark2") +
+      theme_classic(base_size = 13) +
+      labs(
+        title    = "All Models: ECDF of Skill Delta",
+        subtitle = "System − Subregion | Positive = system wins | Negative = subregion wins",
+        x        = "Δ Skill Score (system − subregion)",
+        y        = "Cumulative Probability",
+        color    = "Model"
+      ) +
+      theme(
+        legend.position  = "bottom",
+        axis.line        = element_line(linewidth = 1),
+        strip.background = element_rect(fill = "grey90", color = NA),
+        strip.text       = element_text(face = "bold", size = 11),
+        plot.title       = element_text(face = "bold", size = 14),
+        plot.subtitle    = element_text(size = 11, color = "gray40")
+      )
+    
+    ggsave(file.path(scale_run_folder, "all_models_delta_ecdf.png"),
+           p_delta_ecdf, width = 10, height = 10, dpi = 300)
+    cat("  ✓ Saved: all_models_delta_ecdf.png\n")
+    
+    # -------------------------------------------------------------------------
+    # PLOT 3: Violin — replaces the scatter/jitter plot [1]
+    # x = model, y = delta_skill, one violin per model, faceted by metric
+    # -------------------------------------------------------------------------
+    
+    p_delta_violin <- ggplot(cross_delta,
+                             aes(x = model_key, y = delta_skill,
+                                 fill = model_key, color = model_key)) +
+      geom_hline(yintercept = 0, linetype = "dashed", color = "gray40", linewidth = 0.7) +
+      geom_violin(alpha = 0.3, linewidth = 0.9, trim = FALSE) +
+      geom_boxplot(width = 0.08, alpha = 0.8, outlier.shape = NA, color = "gray20") +
+      facet_wrap(~metric_label, ncol = 1, scales = "free_y") +
+      scale_fill_brewer(palette  = "Dark2") +
+      scale_color_brewer(palette = "Dark2") +
+      theme_classic(base_size = 13) +
+      labs(
+        title    = "All Models: Skill Delta Distribution (System − Subregion)",
+        subtitle = "Positive = system wins | Negative = subregion wins | Line = median",
+        x        = NULL,
+        y        = "Δ Skill Score (system − subregion)",
+        fill     = "Model",
+        color    = "Model"
+      ) +
+      theme(
+        legend.position  = "bottom",
+        axis.line        = element_line(linewidth = 1),
+        axis.text.x      = element_text(angle = 45, hjust = 1, face = "bold", size = 10),
+        strip.background = element_rect(fill = "grey90", color = NA),
+        strip.text       = element_text(face = "bold", size = 11),
+        plot.title       = element_text(face = "bold", size = 14),
+        plot.subtitle    = element_text(size = 11, color = "gray40")
+      )
+    
+    ggsave(file.path(scale_run_folder, "all_models_delta_violin.png"),
+           p_delta_violin, width = 12, height = 10, dpi = 300)
+    cat("  ✓ Saved: all_models_delta_violin.png\n")
+  }
   # ===========================================================================
   # PART 3: AGGREGATED CROSS-MODEL SUMMARY (across windows)
   # ===========================================================================
