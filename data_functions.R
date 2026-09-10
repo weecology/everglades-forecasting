@@ -20,8 +20,18 @@ translate_level_for_wader <- function(level) {
 # =============================================================================
 # WATER DATA
 # =============================================================================
-get_data_water <- function(eden_path = "WaterData", update = FALSE) {
-  if (update) {
+get_data_water <- function(eden_path = "WaterData", update = FALSE, max_age_days = 7) {
+  
+  water_file <- file.path(eden_path, "eden_covariates.csv")
+  
+  # Auto-trigger update if file is missing or older than max_age_days
+  needs_update <- update ||
+    !file.exists(water_file) || {
+      stamp <- file.info(water_file)$mtime
+      is.na(stamp) || difftime(Sys.time(), stamp, units = "days") > max_age_days
+    }
+  
+  if (needs_update) {
     cat("📥 Downloading fresh EDEN water data...\n")
     update_water(eden_path)
     water <- get_eden_covariates(eden_path = eden_path, level = "subregions") |>
@@ -34,31 +44,24 @@ get_data_water <- function(eden_path = "WaterData", update = FALSE) {
       mutate(year = as.integer(year)) |>
       arrange(year, region)
     
-    # Save updated covariates
-    write_csv(water, file.path(eden_path, "eden_covariates.csv"))
+    write_csv(water, water_file)
     cat(glue::glue(
-      "✓ Water data updated and saved to {eden_path}/eden_covariates.csv\n",
+      "✓ Water data updated and saved to {water_file}\n",
       "  Years: {min(water$year)}-{max(water$year)}\n",
       "  Regions: {paste(unique(water$region), collapse = ', ')}\n"
     ))
     
   } else {
-    water_file <- file.path(eden_path, "eden_covariates.csv")
-    
-    if (!file.exists(water_file)) {
-      stop(glue::glue(
-        "Water data file not found: {water_file}\n",
-        "Run get_data_water(update = TRUE) to download fresh data"
-      ))
-    }
-    
     water <- read_csv(water_file, show_col_types = FALSE)
     
+    age_days <- round(as.numeric(difftime(Sys.time(),
+                                          file.info(water_file)$mtime,
+                                          units = "days")), 1)
     cat(glue::glue(
       "✓ Water data loaded from: {water_file}\n",
       "  Years: {min(water$year)}-{max(water$year)}\n",
       "  Regions: {paste(unique(water$region), collapse = ', ')}\n",
-      "  Last modified: {format(file.info(water_file)$mtime, '%Y-%m-%d')}\n"
+      "  Last modified: {format(file.info(water_file)$mtime, '%Y-%m-%d')} ({age_days} days old)\n"
     ))
   }
   
