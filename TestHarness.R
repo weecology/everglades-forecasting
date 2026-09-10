@@ -12,6 +12,10 @@ plan(sequential)
 
 
 
+# add some log scores???
+
+
+
 # Load necessary functions
 source("data_functions.R")
 source("evaluation.R")
@@ -24,11 +28,12 @@ source("evaluation.R")
 TEST_CONFIG <- list(
   # Data settings
   spatial = list(
-    level = "system",  # or "subregion", "colony"
-    include_species = c("gbhe", "greg"),  # Just 2 species for speed
+    level = "subregion",  # "system", "subregion", "colony"
+    include_species = c('all'),  # Just 2 species for speed
     include_unknowns = FALSE,
-    forecast_totals = FALSE,
-    run_by_region = FALSE
+    forecast_totals = TRUE,
+    run_by_region = FALSE, 
+    exclude_regions = c("bigcypress", "coastal")   #don't have water data for these yet... 
   ),
   
   # Minimal MCMC for fast testing

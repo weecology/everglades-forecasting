@@ -40,9 +40,12 @@ fit_mvgam_trait <- function(train_data, test_data, config) {
     poisson()
   } else if (config$family == "nb") {
     nb()
+  } else if (config$family == "gaussian") {
+    gaussian()
   } else {
     nb()
   }
+  
   
   tryCatch({
     model <- mvgam(

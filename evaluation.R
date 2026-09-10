@@ -1,6 +1,7 @@
 # =============================================================================
 # EVALUATION.R - Cross-validation and forecast evaluation
 # Handles both system-wide (species only) and subregional (species x region)
+# Handles both species-level and total count forecasting modes
 # Consistent evaluation for both mvgam and fable frameworks
 # =============================================================================
 
@@ -45,7 +46,6 @@ fit_sliding_window <- function(data, make_forecast, train_years, test_years,
   year_min <- min(data$year)
   year_max <- max(data$year)
   
-  # Setup parallel processing
   if (parallel) {
     parallel_config <- setup_parallel(enabled = TRUE, workers = workers)
   } else {
@@ -70,138 +70,78 @@ fit_sliding_window <- function(data, make_forecast, train_years, test_years,
   cat(glue::glue("  CV windows:  {n_windows}\n\n"))
   cat(glue::glue("=== Fitting models across {n_windows} windows ===\n\n"))
   
-  # Capture extra args for passing to make_fable_evaluation
   dots <- list(...)
   
-  # Use conditional execution based on parallel setting
-  if (parallel) {
-    results_list <- furrr::future_map(
-      seq_along(train_starts),
-      function(i) {
-        cat(glue::glue(
-          "Window {i}/{n_windows}: ",
-          "Train {train_starts[i]}-{test_starts[i]-1}, ",
-          "Test {test_starts[i]}-{test_starts[i]+test_years-1}\n"
-        ))
-        
-        train_data <- data |> filter(year >= train_starts[i] & year < test_starts[i])
-        test_data  <- data |> filter(year >= test_starts[i]  & year < test_starts[i] + test_years)
-        
-        # Run forecast function
-        forecast_and_metrics <- tryCatch({
-          make_forecast(train_data, test_data, ...)
-        }, error = function(e) {
-          warning(glue::glue("Window {i} failed: {e$message}"))
-          list(tibble(), tibble())
-        })
-        
-        fc_raw  <- forecast_and_metrics[[1]]
-        met_raw <- forecast_and_metrics[[2]]
-        
-        # FABLE: compute skill scores here
-        is_fable <- inherits(fc_raw, "fable") ||
-          (is.data.frame(fc_raw) && ".model" %in% names(fc_raw) &&
-             "count" %in% names(fc_raw) && inherits(fc_raw$count, "distribution"))
-        
-        if (is_fable && !is.null(met_raw) && nrow(met_raw) > 0) {
-          met_out <- tryCatch({
-            make_fable_evaluation(
-              raw_metrics        = met_raw,
-              forecasts          = fc_raw,
-              test_data          = test_data,
-              train_data         = train_data,
-              config             = CONFIG,
-              precomputed_breaks = dots$precomputed_breaks,
-              use_ordinal        = dots$use_ordinal %||% FALSE
-            ) |>
-              as_tibble() |>
-              mutate(test_start = test_starts[i], window = i)
-          }, error = function(e) {
-            warning(glue::glue("Fable evaluation window {i}: {e$message}"))
-            tibble()
-          })
-        } else {
-          met_out <- tryCatch({
-            met_raw |>
-              as_tibble() |>
-              mutate(test_start = test_starts[i], window = i)
-          }, error = function(e) tibble())
-        }
-        
-        fc_out <- tryCatch({
-          fc_raw |>
-            as_tibble() |>
-            mutate(test_start = test_starts[i], window = i)
-        }, error = function(e) {
-          warning(glue::glue("Could not convert forecasts window {i}: {e$message}"))
-          tibble()
-        })
-        
-        list(forecasts = fc_out, metrics = met_out)
-      },
-      .options = furrr_options(seed = TRUE)
-    )
-  } else {
-    results_list <- lapply(seq_along(train_starts), function(i) {
-      cat(glue::glue(
-        "Window {i}/{n_windows}: ",
-        "Train {train_starts[i]}-{test_starts[i]-1}, ",
-        "Test {test_starts[i]}-{test_starts[i]+test_years-1}\n"
-      ))
-      
-      train_data <- data |> filter(year >= train_starts[i] & year < test_starts[i])
-      test_data  <- data |> filter(year >= test_starts[i]  & year < test_starts[i] + test_years)
-      
-      forecast_and_metrics <- tryCatch({
-        make_forecast(train_data, test_data, ...)
-      }, error = function(e) {
-        warning(glue::glue("Window {i} failed: {e$message}"))
-        list(tibble(), tibble())
-      })
-      
-      fc_raw  <- forecast_and_metrics[[1]]
-      met_raw <- forecast_and_metrics[[2]]
-      
-      is_fable <- inherits(fc_raw, "fable") ||
-        (is.data.frame(fc_raw) && ".model" %in% names(fc_raw) &&
-           "count" %in% names(fc_raw) && inherits(fc_raw$count, "distribution"))
-      
-      if (is_fable && !is.null(met_raw) && nrow(met_raw) > 0) {
-        met_out <- tryCatch({
-          make_fable_evaluation(
-            raw_metrics        = met_raw,
-            forecasts          = fc_raw,
-            test_data          = test_data,
-            train_data         = train_data,
-            config             = CONFIG,
-            precomputed_breaks = dots$precomputed_breaks,
-            use_ordinal        = dots$use_ordinal %||% FALSE
-          ) |>
-            as_tibble() |>
-            mutate(test_start = test_starts[i], window = i)
-        }, error = function(e) {
-          warning(glue::glue("Fable evaluation window {i}: {e$message}"))
-          tibble()
-        })
-      } else {
-        met_out <- tryCatch({
-          met_raw |>
-            as_tibble() |>
-            mutate(test_start = test_starts[i], window = i)
-        }, error = function(e) tibble())
-      }
-      
-      fc_out <- tryCatch({
-        fc_raw |>
+  run_window <- function(i) {
+    cat(glue::glue(
+      "Window {i}/{n_windows}: ",
+      "Train {train_starts[i]}-{test_starts[i]-1}, ",
+      "Test {test_starts[i]}-{test_starts[i]+test_years-1}\n"
+    ))
+    
+    train_data <- data |> filter(year >= train_starts[i] & year < test_starts[i])
+    test_data  <- data |> filter(year >= test_starts[i]  & year < test_starts[i] + test_years)
+    
+    forecast_and_metrics <- tryCatch({
+      make_forecast(train_data, test_data, ...)
+    }, error = function(e) {
+      warning(glue::glue("Window {i} failed: {e$message}"))
+      message("FULL ERROR: ", conditionMessage(e))
+      list(tibble(), tibble())
+    })
+    
+    fc_raw  <- forecast_and_metrics[[1]]
+    met_raw <- forecast_and_metrics[[2]]
+    
+    is_fable <- inherits(fc_raw, "fable") ||
+      (is.data.frame(fc_raw) && ".model" %in% names(fc_raw) &&
+         "count" %in% names(fc_raw) && inherits(fc_raw$count, "distribution"))
+    
+    if (is_fable && !is.null(met_raw) && nrow(met_raw) > 0) {
+      met_out <- tryCatch({
+        make_fable_evaluation(
+          raw_metrics        = met_raw,
+          forecasts          = fc_raw,
+          test_data          = test_data,
+          train_data         = train_data,
+          config             = CONFIG,
+          precomputed_breaks = dots$precomputed_breaks,
+          use_ordinal        = dots$use_ordinal %||% FALSE
+        ) |>
           as_tibble() |>
           mutate(test_start = test_starts[i], window = i)
       }, error = function(e) {
-        warning(glue::glue("Could not convert forecasts window {i}: {e$message}"))
+        warning(glue::glue("Fable evaluation window {i}: {e$message}"))
         tibble()
       })
-      
-      list(forecasts = fc_out, metrics = met_out)
+    } else {
+      met_out <- tryCatch({
+        met_raw |>
+          as_tibble() |>
+          mutate(test_start = test_starts[i], window = i)
+      }, error = function(e) tibble())
+    }
+    
+    fc_out <- tryCatch({
+      fc_raw |>
+        as_tibble() |>
+        mutate(test_start = test_starts[i], window = i)
+    }, error = function(e) {
+      warning(glue::glue("Could not convert forecasts window {i}: {e$message}"))
+      tibble()
     })
+    
+    list(forecasts = fc_out, metrics = met_out)
+  }
+  
+  if (parallel) {
+    results_list <- furrr::future_map(
+      seq_along(train_starts),
+      run_window,
+      .options = furrr_options(seed = TRUE)
+    )
+  } else {
+    results_list <- lapply(seq_along(train_starts), run_window)
   }
   
   cat("\n=== Combining results ===\n")
@@ -228,16 +168,91 @@ fit_sliding_window <- function(data, make_forecast, train_years, test_years,
 # MVGAM EVALUATION - CENTRALIZED EXTRACTION
 # =============================================================================
 
+# -----------------------------------------------------------------------------
+# FIX 1 (Copilot): Replace quadratic outer() CRPS with O(n log n) sorted-sample
+# energy score identity. Avoids allocating n_samples x n_samples matrix per
+# timepoint per series per window.
+# -----------------------------------------------------------------------------
+
+crps_energy <- function(samples, y) {
+  s <- sort(as.numeric(samples))
+  n <- length(s)
+  # Energy score identity: E|S-y| - 0.5*E|S-S'|
+  # = mean(|s-y|) - sum((2i - n - 1) * s[i]) / n^2
+  mean(abs(s - y)) - sum((2 * seq_len(n) - n - 1) * s) / (n^2)
+}
+
 #' Extract CRPS scores from mvgam forecast object
 extract_crps_mvgam <- function(forecast_obj, model_name) {
-  crps_raw  <- score(forecast_obj, score = "crps")
-  crps_list <- crps_raw[names(crps_raw) != "all_series"]
   
-  bind_rows(lapply(names(crps_list), function(sp) {
+  # Try score() first — works for multi-series / multi-timepoint
+  sc <- tryCatch(
+    score(forecast_obj, score = "crps"),
+    error = function(e) NULL
+  )
+  
+  if (!is.null(sc)) {
+    if (is.data.frame(sc)) {
+      return(data.frame(
+        series       = "Total",
+        score        = sc$score,
+        eval_horizon = sc$eval_horizon,
+        model        = model_name,
+        stringsAsFactors = FALSE
+      ))
+    }
+    crps_list <- sc[names(sc) != "all_series"]
+    if (length(crps_list) == 0 && "all_series" %in% names(sc)) {
+      crps_list <- list(Total = sc$all_series)
+    }
+    if (length(crps_list) > 0) {
+      return(bind_rows(lapply(names(crps_list), function(sp) {
+        data.frame(
+          series       = sp,
+          score        = crps_list[[sp]]$score,
+          eval_horizon = crps_list[[sp]]$eval_horizon,
+          model        = model_name,
+          stringsAsFactors = FALSE
+        )
+      })))
+    }
+  }
+  
+  # score() failed — manually compute CRPS using efficient energy score identity
+  cat("    ℹ Using manual CRPS for single series\n")
+  
+  series_names <- levels(forecast_obj$series_names)
+  
+  bind_rows(lapply(series_names, function(sname) {
+    
+    fc_samples <- forecast_obj$forecasts[[sname]]
+    obs        <- forecast_obj$test_observations[[sname]]
+    
+    # Normalise to matrix [n_samples x n_timepoints]
+    if (is.vector(fc_samples) && !is.matrix(fc_samples)) {
+      fc_samples <- matrix(fc_samples, ncol = 1)
+    }
+    if (is.matrix(fc_samples) && nrow(fc_samples) == 1 && length(obs) > 1) {
+      fc_samples <- t(fc_samples)
+    }
+    
+    obs <- as.numeric(obs)
+    n_t <- length(obs)
+    
+    # Trim columns to match obs length
+    if (ncol(fc_samples) > n_t) {
+      fc_samples <- fc_samples[, seq_len(n_t), drop = FALSE]
+    }
+    
+    # FIX 1: use crps_energy() instead of outer()
+    crps_vals <- sapply(seq_len(n_t), function(t) {
+      crps_energy(fc_samples[, t], obs[t])
+    })
+    
     data.frame(
-      series       = sp,
-      score        = crps_list[[sp]]$score,
-      eval_horizon = crps_list[[sp]]$eval_horizon,
+      series       = sname,
+      score        = crps_vals,
+      eval_horizon = seq_along(crps_vals),
       model        = model_name,
       stringsAsFactors = FALSE
     )
@@ -321,7 +336,7 @@ calculate_rps_mvgam <- function(predictions, test_data, train_data, config,
         
         obs_cat  <- obs_filtered |> pull(count_category) |> as.numeric()
         prob_mat <- pick(prob_low, prob_medium, prob_high, prob_very_high) |>
-          as.matrix()
+          base::as.matrix()
         
         mean(rps(obs_cat, prob_mat)$rps, na.rm = TRUE)
       },
@@ -350,6 +365,16 @@ calculate_rps_mvgam <- function(predictions, test_data, train_data, config,
 #' Main mvgam forecasting and evaluation function
 make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
                                  use_ordinal = FALSE, precomputed_breaks = NULL) {
+  
+  # Always include baseline for skill score comparisons
+  if (!"baseline" %in% models_to_run) {
+    models_to_run <- c("baseline", models_to_run)
+  }
+  
+  # Load baseline if not already in environment
+  if (!exists("fit_mvgam_baseline", envir = .GlobalEnv, inherits = TRUE)) {
+    source(file.path("models", "mvgam_baseline.R"))
+  }
   
   # =========================================================================
   # LOAD MODEL FUNCTIONS
@@ -429,31 +454,23 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
   cat(glue::glue("  N series: {length(all_series)}\n"))
   
   # =========================================================================
-  # YEAR MAPPING FOR FORECAST EXTRACTION
+  # YEAR MAPPING: time integer → calendar year
   # =========================================================================
   
   n_test_years <- length(unique(test_data$year))
   
   if (has_region) {
-    test_years_by_series <- test_data |>
+    time_to_year <- test_data |>
       as_tibble() |>
-      mutate(series_id = paste(species, region, sep = "_")) |>
-      dplyr::select(series_id, year) |>
-      distinct() |>
-      group_by(series_id) |>
-      arrange(year) |>
-      mutate(forecast_index = row_number()) |>
-      ungroup()
+      mutate(series_id = as.character(paste(species, region, sep = "_"))) |>
+      dplyr::select(series_id, time, year) |>
+      distinct()
   } else {
-    test_years_by_series <- test_data |>
+    time_to_year <- test_data |>
       as_tibble() |>
-      dplyr::select(species, year) |>
-      distinct() |>
-      group_by(species) |>
-      arrange(year) |>
-      mutate(forecast_index = row_number()) |>
-      ungroup() |>
-      rename(series_id = species)
+      mutate(series_id = as.character(species)) |>
+      dplyr::select(series_id, time, year) |>
+      distinct()
   }
   
   cat(glue::glue("  Test years: {n_test_years} per series\n"))
@@ -505,12 +522,24 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
     result <- results[[model_name]]
     if (is.null(result$fc)) return(tibble())
     
-    fc_summary <- summary(result$fc)
+    fc_summary <- tryCatch({
+      s <- summary(result$fc)
+      if (is.list(s) && !is.data.frame(s)) s <- bind_rows(s)
+      as_tibble(s)
+    }, error = function(e) {
+      warning(glue::glue("Could not summarise fc for {model_name}: {e$message}"))
+      return(tibble())
+    })
+    
+    if (nrow(fc_summary) == 0) return(tibble())
+    
+    real_times <- sort(unique(test_data$time))
     
     fc_only <- fc_summary |>
-      as_tibble() |>
-      group_by(series) |>
-      slice(1:n_test_years) |>
+      mutate(series_id = as.character(series)) |>
+      filter(time %in% real_times) |>
+      group_by(series_id) |>
+      slice(seq_len(min(n(), n_test_years))) |>
       ungroup()
     
     fc_out <- fc_only |>
@@ -519,11 +548,7 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
         Q2.5     = predQ2.5,
         Q97.5    = predQ97.5
       ) |>
-      mutate(
-        series_id      = as.character(series),
-        forecast_index = time
-      ) |>
-      left_join(test_years_by_series, by = c("series_id", "forecast_index"))
+      left_join(time_to_year, by = c("series_id", "time"))
     
     if (has_region) {
       fc_out <- fc_out |>
@@ -544,14 +569,13 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
   
   all_crps <- bind_rows(lapply(results, function(x) x$crps))
   
-  # ✅ FIXED: Changed underscores to multiplication operators
   expected_n <- length(results) * length(all_series) * n_test_years
   cat(glue::glue("  ✓ Extracted {nrow(all_preds)} predictions\n"))
   cat(glue::glue("  Expected:  {expected_n}\n"))
   
   na_count <- sum(is.na(all_preds$year))
   if (na_count > 0) {
-    warning(glue::glue("  ⚠️  {na_count} predictions have NA years"))
+    warning(glue::glue("  ⚠️  {na_count} predictions have NA years — check time→year mapping"))
   } else {
     cat("  ✓ All forecasts have valid years\n")
   }
@@ -647,7 +671,6 @@ calculate_rps_fable <- function(forecasts, test_data, train_data, config,
   
   group_vars <- if (has_region) c("species", "region") else "species"
   
-  # Ordinal breaks
   if (!is.null(precomputed_breaks)) {
     quantiles_by_group <- precomputed_breaks
   } else {
@@ -663,7 +686,6 @@ calculate_rps_fable <- function(forecasts, test_data, train_data, config,
       )
   }
   
-  # Forecast probabilities
   forecasts_probs <- forecasts |>
     as_tibble() |>
     left_join(quantiles_by_group, by = group_vars) |>
@@ -678,7 +700,6 @@ calculate_rps_fable <- function(forecasts, test_data, train_data, config,
     ) |>
     ungroup()
   
-  # Ordinal observations
   test_data_ordinal <- test_data |>
     as_tibble() |>
     left_join(quantiles_by_group, by = group_vars) |>
@@ -719,7 +740,6 @@ calculate_rps_fable <- function(forecasts, test_data, train_data, config,
       .groups = "drop"
     )
   
-  # Skill scores
   baseline_rps <- rps_by_model |>
     filter(.model == "baseline") |>
     dplyr::select(all_of(c(group_vars, "rps"))) |>
@@ -821,6 +841,22 @@ filter_ordinal_years <- function(df, ordinal_years) {
   df
 }
 
+# -----------------------------------------------------------------------------
+# FIX 3 (Copilot): Guard for CONFIG skip flag.
+# Call this at the top of main.R to prevent config::get() from overwriting
+# the per-scale CONFIG built in run_all_scales.R.
+#
+# Usage in main.R:
+#   guard_config_init()
+# -----------------------------------------------------------------------------
+
+guard_config_init <- function() {
+  if (!isTRUE(CONFIG$.skip_config_init)) {
+    Sys.setenv(R_CONFIG_ACTIVE = base_profile)
+    CONFIG <<- config::get()
+  }
+}
+
 #' Print cross-validation summary
 print_cv_summary <- function(cv_results) {
   cat("\n=== Cross-Validation Summary ===\n")
@@ -836,7 +872,6 @@ print_cv_summary <- function(cv_results) {
     
     metrics <- cv_results$metrics
     
-    # Handle both mvgam ("model") and fable (".model")
     if ("model" %in% names(metrics)) {
       model_col <- "model"
     } else if (".model" %in% names(metrics)) {

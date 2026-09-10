@@ -46,3 +46,4 @@ Thumbs.db
 ".Rhistory" 
 "cache/" 
 "logs/" 
+"*_id"

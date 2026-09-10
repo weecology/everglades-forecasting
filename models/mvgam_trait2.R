@@ -57,9 +57,12 @@ fit_mvgam_trait2 <- function(train_data, test_data, config) {
     poisson()
   } else if (config$family == "nb") {
     nb()
+  } else if (config$family == "gaussian") {
+    gaussian()
   } else {
     nb()
   }
+  
   
   
   tryCatch({
@@ -78,8 +81,8 @@ fit_mvgam_trait2 <- function(train_data, test_data, config) {
         s(foraging_guild, by = dry_days, bs = 're') +
         s(body_size, bs = 're') +
         s(body_size, by = stress_index, bs = 're') +
-        s(breed_season_depth, by = trend, bs = 'fs', k = 4) +  
-        s(recession, by = trend, bs = 'fs', k = 4),
+        s(dry_days, trend, bs = 'sz', xt = list(bs = 'cr'), k = 4) +
+        s(breed_season_depth, trend, bs = 'sz', xt = list(bs = 'cr'), k = 4),
       
       trend_model = mvgam::AR(p = 1),
       data = train_enriched,
