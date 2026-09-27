@@ -157,9 +157,7 @@ run_single_model <- function(model_key) {
     CONFIG$spatial$level         <- current_scale
     CONFIG$spatial$run_by_region <- current_scale != "system"
     CONFIG$.skip_config_init     <- TRUE
-    CONFIG$parallel$enabled      <- FALSE  # Keep FALSE — avoids nested Stan parallelism
-    
-    assign("CONFIG", CONFIG, envir = .GlobalEnv) 
+    CONFIG$parallel$enabled      <- FALSE
     
     if (framework == "mvgam") {
       CONFIG$models$mvgam <- c("baseline", model_name)
@@ -173,6 +171,8 @@ run_single_model <- function(model_key) {
       CONFIG$run_fable    <- TRUE
     }
     
+    assign("CONFIG", CONFIG, envir = .GlobalEnv)
+    
     if (framework == "mvgam") {
       model_file <- file.path("models", paste0("mvgam_", model_name, ".R"))
       if (file.exists(model_file)) { source(model_file, local = FALSE); cat(glue("  ✓ Pre-loaded {model_name}\n")) }
@@ -180,12 +180,47 @@ run_single_model <- function(model_key) {
       if (file.exists(baseline_file)) { source(baseline_file, local = FALSE); cat("  ✓ Pre-loaded baseline\n") }
     }
     
+    # -------------------------------------------------------------------------
+    # Run with tryCatch — capture both errors and the run_folder result
+    # -------------------------------------------------------------------------
+    run_succeeded <- FALSE
+    run_folder    <- NULL
+    
     tryCatch({
       source("main.R")
       
-      if (exists("run_folder") && !is.null(run_folder)) {
-        dest_folder   <- file.path(model_folder, current_scale)
-        files_to_copy <- list.files(run_folder, full.names = TRUE, recursive = TRUE)
+      # Verify run_folder was actually created and contains results
+      if (!exists("run_folder") || is.null(run_folder)) {
+        stop("main.R completed but run_folder was not set")
+      }
+      if (!dir.exists(run_folder)) {
+        stop(glue("run_folder was set to '{run_folder}' but directory does not exist"))
+      }
+      rds_path <- file.path(run_folder, "forecast_results.rds")
+      if (!file.exists(rds_path)) {
+        stop(glue("run_folder exists but forecast_results.rds is missing: {rds_path}"))
+      }
+      
+      run_succeeded <- TRUE
+      
+    }, error = function(e) {
+      cat(glue("\n  ✗ {model_key} at {current_scale} FAILED\n"))
+      cat(glue("    Reason: {e$message}\n"))
+      cat(glue("    run_folder at time of error: {if (exists('run_folder') && !is.null(run_folder)) run_folder else 'not set'}\n"))
+    })
+    
+    # -------------------------------------------------------------------------
+    # Only copy results if run genuinely succeeded
+    # -------------------------------------------------------------------------
+    if (run_succeeded && !is.null(run_folder)) {
+      
+      dest_folder   <- file.path(model_folder, current_scale)
+      files_to_copy <- list.files(run_folder, full.names = TRUE, recursive = TRUE)
+      
+      if (length(files_to_copy) == 0) {
+        cat(glue("  ⚠ run_folder exists but is empty: {run_folder}\n"))
+        model_scale_results[[current_scale]] <- NULL
+      } else {
         for (src_file in files_to_copy) {
           rel_path  <- sub(paste0(run_folder, "/"), "", src_file)
           dest_file <- file.path(dest_folder, rel_path)
@@ -194,21 +229,36 @@ run_single_model <- function(model_key) {
         }
         model_scale_results[[current_scale]] <- dest_folder
         unlink(run_folder, recursive = TRUE)
-        cat("  ✓ Results saved\n")
-      } else {
-        warning(glue("  ✗ {model_key} at {current_scale} failed to create run_folder"))
-        model_scale_results[[current_scale]] <- NULL
+        cat(glue("  ✓ Results saved to: {dest_folder}\n"))
       }
       
-    }, error = function(e) {
-      warning(glue("  ✗ {model_key} at {current_scale} failed: {e$message}"))
+    } else {
+      
+      # Log a diagnostic summary to a file so failures aren't lost silently
+      fail_log <- file.path(model_folder, glue("FAILED_{current_scale}.txt"))
+      writeLines(c(
+        glue("Model:  {model_key}"),
+        glue("Scale:  {current_scale}"),
+        glue("Time:   {format(Sys.time())}"),
+        glue("run_folder: {if (exists('run_folder') && !is.null(run_folder)) run_folder else 'not set'}"),
+        "",
+        "Check that main.R completes without error for this scale and saves forecast_results.rds."
+      ), fail_log)
+      
+      cat(glue("  ✗ Failure logged to: {fail_log}\n"))
       model_scale_results[[current_scale]] <- NULL
-    })
+    }
     
     gc()
   }
   
-  cat(glue("\n✓ {model_key} complete across all scales\n"))
+  # Report which scales succeeded and which failed
+  cat(glue("\n✓ {model_key} complete\n"))
+  succeeded <- names(Filter(Negate(is.null), model_scale_results))
+  failed    <- setdiff(SCALES_TO_RUN, succeeded)
+  if (length(succeeded) > 0) cat(glue("  ✓ Succeeded: {paste(succeeded, collapse = ', ')}\n"))
+  if (length(failed)    > 0) cat(glue("  ✗ Failed:    {paste(failed,    collapse = ', ')}\n"))
+  
   return(model_scale_results)
 }
 

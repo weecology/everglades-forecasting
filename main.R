@@ -32,7 +32,6 @@ print_banner("WADING BIRD FORECASTING PIPELINE")
 cat("Starting at:", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "\n")
 
 suppressPackageStartupMessages({
-  library(conflicted)
   library(distributional)
   library(dplyr)
   library(ggplot2)
@@ -47,12 +46,13 @@ suppressPackageStartupMessages({
   library(progressr)
 })
 # Handle namespace conflicts
-conflict_prefer("filter",    "dplyr")
-conflict_prefer("select",    "dplyr")
-conflict_prefer("AR",        "mvgam")
-conflict_prefer("VAR",       "mvgam")
-conflict_prefer("RW",        "mvgam")
-conflict_prefer("as.matrix", "base")
+conflicted::conflicts_prefer(dplyr::filter)
+conflicted::conflicts_prefer(dplyr::select)
+conflicted::conflicts_prefer(mvgam::AR)
+conflicted::conflicts_prefer(mvgam::VAR)
+conflicted::conflicts_prefer(mvgam::RW)
+conflicted::conflicts_prefer(base::as.matrix)
+
 
 # =============================================================================
 # CHECK CMDSTAN
