@@ -4,7 +4,10 @@
 # Handles both species-level and total count forecasting modes
 # Consistent evaluation for both mvgam and fable frameworks
 # =============================================================================
-
+# NOTE: config is intentionally NOT loaded with library() here.
+# All config access uses config::get() explicitly to avoid conflicted
+# flagging the get() ambiguity between config::get and base::get,
+# which breaks furrr's internal function lookup in parallel workers.
 library(dplyr)
 library(tidyr)
 library(verification)
@@ -16,7 +19,6 @@ library(progressr)
 # =============================================================================
 # PARALLEL PROCESSING
 # =============================================================================
-
 setup_parallel <- function(enabled = TRUE, workers = NULL) {
   if (!enabled) {
     plan(sequential)
@@ -36,11 +38,10 @@ setup_parallel <- function(enabled = TRUE, workers = NULL) {
 # =============================================================================
 # SLIDING WINDOW CROSS-VALIDATION
 # =============================================================================
-
 fit_sliding_window <- function(data, make_forecast, train_years, test_years,
                                cv_windows = NULL,
-                               parallel = FALSE,
-                               workers = NULL,
+                               parallel   = FALSE,
+                               workers    = NULL,
                                ...) {
   
   year_min <- min(data$year)
@@ -169,23 +170,40 @@ fit_sliding_window <- function(data, make_forecast, train_years, test_years,
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# FIX 1 (Copilot): Replace quadratic outer() CRPS with O(n log n) sorted-sample
-# energy score identity. Avoids allocating n_samples x n_samples matrix per
-# timepoint per series per window.
+# Efficient O(n log n) CRPS via the energy score identity.
+# Avoids the O(n^2) outer() matrix allocation of the naive implementation.
+# CRPS(F, y) = E|S - y| - 0.5 * E|S - S'|
+#            = mean(|s - y|) - sum((2i - n - 1) * s[i]) / n^2   (sorted s)
 # -----------------------------------------------------------------------------
-
 crps_energy <- function(samples, y) {
   s <- sort(as.numeric(samples))
   n <- length(s)
-  # Energy score identity: E|S-y| - 0.5*E|S-S'|
-  # = mean(|s-y|) - sum((2i - n - 1) * s[i]) / n^2
   mean(abs(s - y)) - sum((2 * seq_len(n) - n - 1) * s) / (n^2)
 }
 
-#' Extract CRPS scores from mvgam forecast object
+# -----------------------------------------------------------------------------
+# Safe ordinal cut: returns NA (not an error) when any break is NA/NaN,
+# and falls back gracefully when all observations fall outside all breaks.
+# Both RPS functions call this instead of bare cut().
+# -----------------------------------------------------------------------------
+safe_cut_ordinal <- function(x, low, medium, high) {
+  if (anyNA(c(low, medium, high))) {
+    return(factor(rep(NA_character_, length(x)),
+                  levels  = c("Low", "Medium", "High", "Very High"),
+                  ordered = TRUE))
+  }
+  cut(
+    x,
+    breaks  = c(-Inf, low, medium, high, Inf),
+    labels  = c("Low", "Medium", "High", "Very High"),
+    ordered = TRUE
+  )
+}
+
+#' Extract CRPS scores from an mvgam forecast object
 extract_crps_mvgam <- function(forecast_obj, model_name) {
   
-  # Try score() first — works for multi-series / multi-timepoint
+  # ---- Try score() first (works for multi-series / multi-timepoint) --------
   sc <- tryCatch(
     score(forecast_obj, score = "crps"),
     error = function(e) NULL
@@ -201,10 +219,12 @@ extract_crps_mvgam <- function(forecast_obj, model_name) {
         stringsAsFactors = FALSE
       ))
     }
+    
     crps_list <- sc[names(sc) != "all_series"]
     if (length(crps_list) == 0 && "all_series" %in% names(sc)) {
       crps_list <- list(Total = sc$all_series)
     }
+    
     if (length(crps_list) > 0) {
       return(bind_rows(lapply(names(crps_list), function(sp) {
         data.frame(
@@ -218,17 +238,19 @@ extract_crps_mvgam <- function(forecast_obj, model_name) {
     }
   }
   
-  # score() failed — manually compute CRPS using efficient energy score identity
+  # ---- score() unavailable — manual CRPS via crps_energy() -----------------
   cat("    ℹ Using manual CRPS for single series\n")
   
-  series_names <- levels(forecast_obj$series_names)
+  # series_names may be a factor or a plain character vector depending on
+  # mvgam version; normalise to character to avoid levels() returning NULL.
+  series_names <- as.character(unique(forecast_obj$series_names))
   
   bind_rows(lapply(series_names, function(sname) {
     
     fc_samples <- forecast_obj$forecasts[[sname]]
     obs        <- forecast_obj$test_observations[[sname]]
     
-    # Normalise to matrix [n_samples x n_timepoints]
+    # Normalise to matrix [n_samples × n_timepoints]
     if (is.vector(fc_samples) && !is.matrix(fc_samples)) {
       fc_samples <- matrix(fc_samples, ncol = 1)
     }
@@ -239,12 +261,10 @@ extract_crps_mvgam <- function(forecast_obj, model_name) {
     obs <- as.numeric(obs)
     n_t <- length(obs)
     
-    # Trim columns to match obs length
     if (ncol(fc_samples) > n_t) {
       fc_samples <- fc_samples[, seq_len(n_t), drop = FALSE]
     }
     
-    # FIX 1: use crps_energy() instead of outer()
     crps_vals <- sapply(seq_len(n_t), function(t) {
       crps_energy(fc_samples[, t], obs[t])
     })
@@ -290,17 +310,13 @@ calculate_rps_mvgam <- function(predictions, test_data, train_data, config,
     "species"
   }
   
+  # Use safe_cut_ordinal() so NA breaks produce NA categories, not errors
   test_data_ordinal <- test_data |>
     as_tibble() |>
     left_join(quantiles_by_group, by = join_vars) |>
     rowwise() |>
     mutate(
-      count_category = cut(
-        count,
-        breaks = c(-Inf, low, medium, high, Inf),
-        labels = c("Low", "Medium", "High", "Very High"),
-        ordered = TRUE
-      )
+      count_category = safe_cut_ordinal(count, low, medium, high)
     ) |>
     ungroup()
   
@@ -371,7 +387,6 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
     models_to_run <- c("baseline", models_to_run)
   }
   
-  # Load baseline if not already in environment
   if (!exists("fit_mvgam_baseline", envir = .GlobalEnv, inherits = TRUE)) {
     source(file.path("models", "mvgam_baseline.R"))
   }
@@ -379,7 +394,6 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
   # =========================================================================
   # LOAD MODEL FUNCTIONS
   # =========================================================================
-  
   cat(glue::glue("\n  Checking {length(models_to_run)} mvgam model functions...\n"))
   
   for (model_name in models_to_run) {
@@ -394,7 +408,6 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
   # =========================================================================
   # DETECT SPATIAL LEVEL
   # =========================================================================
-  
   has_region <- "region" %in% names(train_data) &&
     length(unique(train_data$region)) > 1
   min_year   <- min(train_data$year)
@@ -406,7 +419,6 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
   # =========================================================================
   # PREPARE DATA
   # =========================================================================
-  
   if (has_region) {
     all_series <- unique(c(
       paste(train_data$species, train_data$region, sep = "_"),
@@ -456,7 +468,6 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
   # =========================================================================
   # YEAR MAPPING: time integer → calendar year
   # =========================================================================
-  
   n_test_years <- length(unique(test_data$year))
   
   if (has_region) {
@@ -478,7 +489,6 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
   # =========================================================================
   # FIT ALL MODELS
   # =========================================================================
-  
   cat(glue::glue("\n  Fitting {length(models_to_run)} mvgam models...\n"))
   
   results <- list()
@@ -510,7 +520,6 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
   # =========================================================================
   # EXTRACT AND FORMAT ALL FORECASTS
   # =========================================================================
-  
   if (length(results) == 0) {
     warning("All mvgam models failed")
     return(list(predictions = tibble(), metrics = tibble()))
@@ -569,6 +578,7 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
   
   all_crps <- bind_rows(lapply(results, function(x) x$crps))
   
+  # FIX: restored * operators (were mangled to _ in source)
   expected_n <- length(results) * length(all_series) * n_test_years
   cat(glue::glue("  ✓ Extracted {nrow(all_preds)} predictions\n"))
   cat(glue::glue("  Expected:  {expected_n}\n"))
@@ -587,7 +597,6 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
   # =========================================================================
   # DECODE CRPS SERIES LABELS
   # =========================================================================
-  
   if (has_region) {
     all_crps <- all_crps |>
       mutate(
@@ -603,7 +612,6 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
   # =========================================================================
   # CRPS SKILL SCORES
   # =========================================================================
-  
   has_region_crps <- has_region && "region" %in% names(all_crps)
   group_vars      <- if (has_region_crps) c("model", "species", "region") else c("model", "species")
   baseline_vars   <- if (has_region_crps) c("species", "region")           else "species"
@@ -631,7 +639,6 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
   # =========================================================================
   # RPS
   # =========================================================================
-  
   if (use_ordinal) {
     cat("\n  Adding ordinal evaluation (RPS)...\n")
     rps_scores <- tryCatch({
@@ -700,17 +707,13 @@ calculate_rps_fable <- function(forecasts, test_data, train_data, config,
     ) |>
     ungroup()
   
+  # Use safe_cut_ordinal() to avoid errors on NA breaks
   test_data_ordinal <- test_data |>
     as_tibble() |>
     left_join(quantiles_by_group, by = group_vars) |>
     rowwise() |>
     mutate(
-      count_category = cut(
-        count,
-        breaks = c(-Inf, low, medium, high, Inf),
-        labels = c("Low", "Medium", "High", "Very High"),
-        ordered = TRUE
-      )
+      count_category = safe_cut_ordinal(count, low, medium, high)
     ) |>
     ungroup()
   
@@ -770,7 +773,6 @@ make_fable_evaluation <- function(raw_metrics, forecasts, test_data,
   # =========================================================================
   # CRPS AND RMSE SKILL SCORES
   # =========================================================================
-  
   baselines <- raw_metrics |> filter(.model == "baseline")
   
   if (nrow(baselines) == 0) {
@@ -792,12 +794,12 @@ make_fable_evaluation <- function(raw_metrics, forecasts, test_data,
         1 - rmse / rmse_baseline
       )
     ) |>
-    dplyr::select(-.model_baseline)
+    # Drop all *_baseline columns defensively rather than hard-coding one name
+    dplyr::select(-ends_with("_baseline"))
   
   # =========================================================================
   # RPS
   # =========================================================================
-  
   if (isTRUE(use_ordinal)) {
     rps_metrics <- tryCatch({
       calculate_rps_fable(
@@ -842,17 +844,14 @@ filter_ordinal_years <- function(df, ordinal_years) {
 }
 
 # -----------------------------------------------------------------------------
-# FIX 3 (Copilot): Guard for CONFIG skip flag.
-# Call this at the top of main.R to prevent config::get() from overwriting
-# the per-scale CONFIG built in run_all_scales.R.
-#
-# Usage in main.R:
-#   guard_config_init()
+# Guard against config::get() overwriting a pre-built CONFIG.
+# Call at the top of main.R before any config-dependent code.
+# Reads R_CONFIG_ACTIVE from environment; falls back to "default" if unset.
 # -----------------------------------------------------------------------------
-
 guard_config_init <- function() {
   if (!isTRUE(CONFIG$.skip_config_init)) {
-    Sys.setenv(R_CONFIG_ACTIVE = base_profile)
+    active_profile <- Sys.getenv("R_CONFIG_ACTIVE", unset = "default")
+    Sys.setenv(R_CONFIG_ACTIVE = active_profile)
     CONFIG <<- config::get()
   }
 }
@@ -872,10 +871,10 @@ print_cv_summary <- function(cv_results) {
     
     metrics <- cv_results$metrics
     
-    if ("model" %in% names(metrics)) {
-      model_col <- "model"
+    model_col <- if ("model" %in% names(metrics)) {
+      "model"
     } else if (".model" %in% names(metrics)) {
-      model_col <- ".model"
+      ".model"
     } else {
       cat("⚠️  No model column found\n")
       return(invisible(NULL))

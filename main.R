@@ -2,7 +2,7 @@
 # MAIN.R - Wading Bird Forecasting Pipeline
 # Optimized for parallel processing and organized output folders
 #
-# Copilot fix (FIX 2): guard_config_init() called at top to prevent
+# FIX 2 (Copilot): guard_config_init() called at top to prevent
 # config::get() from overwriting the per-scale CONFIG built in
 # run_all_scales.R. Defined in evaluation.R.
 # =============================================================================
@@ -32,8 +32,6 @@ print_banner("WADING BIRD FORECASTING PIPELINE")
 cat("Starting at:", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "\n")
 
 suppressPackageStartupMessages({
-  library(config)
-  library(conflicted)
   library(distributional)
   library(dplyr)
   library(ggplot2)
@@ -49,13 +47,14 @@ suppressPackageStartupMessages({
 })
 
 # Handle namespace conflicts
-conflict_prefer("filter",    "dplyr")
-conflict_prefer("select",    "dplyr")
-conflict_prefer("AR",        "mvgam")
-conflict_prefer("VAR",       "mvgam")
-conflict_prefer("RW",        "mvgam")
-conflict_prefer("get",       "base")
-conflict_prefer("as.matrix", "base")
+# FIX: pass function references (no parentheses) to conflicts_prefer()
+conflicted::conflicts_prefer(dplyr::filter,    .quiet = TRUE)
+conflicted::conflicts_prefer(dplyr::select,    .quiet = TRUE)
+conflicted::conflicts_prefer(mvgam::AR,        .quiet = TRUE)
+conflicted::conflicts_prefer(mvgam::VAR,       .quiet = TRUE)
+conflicted::conflicts_prefer(mvgam::RW,        .quiet = TRUE)
+conflicted::conflicts_prefer(base::as.matrix,  .quiet = TRUE)
+conflicted::conflicts_prefer(base::get,        .quiet = TRUE)  # FIX: was base::get()
 
 # =============================================================================
 # CHECK CMDSTAN
@@ -129,7 +128,11 @@ cat("\n")
 print_section("CREATING RUN FOLDER")
 
 timestamp  <- format(Sys.time(), "%Y%m%d-%H%M")
-run_folder <- file.path("results", paste0("run_", CONFIG$spatial$level, "_", timestamp))
+run_folder <- file.path("results", paste0(
+  "run_", CONFIG$spatial$level, "_",
+  CONFIG$model_key %||% "default", "_",
+  timestamp
+))
 
 dir.create(run_folder,                          recursive = TRUE, showWarnings = FALSE)
 dir.create(file.path(run_folder, "forecasts"), recursive = TRUE, showWarnings = FALSE)
@@ -149,9 +152,6 @@ source("evaluation.R")
 cat("✓ evaluation.R loaded\n")
 
 # FIX 2 (Copilot): now that evaluation.R is loaded, call the guard.
-# If CONFIG$.skip_config_init is TRUE (set by run_all_scales.R),
-# this is a no-op — the per-scale CONFIG is preserved.
-# If running main.R standalone, CONFIG was already loaded above.
 guard_config_init()
 
 source("plotting.R")
@@ -168,9 +168,9 @@ if (CONFIG$run_fable) {
   })
   
   # Re-apply conflicts after fable loads
-  conflict_prefer("AR",  "mvgam")
-  conflict_prefer("VAR", "mvgam")
-  conflict_prefer("RW",  "mvgam")
+  conflicted::conflicts_prefer(mvgam::AR,  .quiet = TRUE)
+  conflicted::conflicts_prefer(mvgam::VAR, .quiet = TRUE)
+  conflicted::conflicts_prefer(mvgam::RW,  .quiet = TRUE)
   
   source("models/fable_models.R")
   cat("✓ fable models loaded\n")
@@ -202,7 +202,15 @@ if (length(stale_xt) > 0) {
   file.remove(stale_xt)
 }
 
-# Download wader data only if missing or older than 1 week
+# =============================================================================
+# SERIAL PRECOMPUTE OF ALL SHARED ARTIFACTS
+# Must complete before setup_parallel() / plan(multisession) is called.
+# Concurrent writes to SiteandMethods/, WaterData/eden_covariates.csv, and
+# cache/data_*.rds from multiple workers can corrupt shared inputs.
+# =============================================================================
+print_section("PRECOMPUTING SHARED DATA ARTIFACTS")
+
+# 1. Wader observation directory
 needs_download <- !dir.exists("SiteandMethods") || {
   stamp <- file.info("SiteandMethods")$mtime
   is.na(stamp) || difftime(Sys.time(), stamp, units = "days") > 7
@@ -211,21 +219,43 @@ needs_download <- !dir.exists("SiteandMethods") || {
 if (needs_download) {
   cat("Downloading wader observation data...\n")
   download_observations(".")
+  cat("✓ Wader observation data downloaded\n")
 } else {
-  age_days <- round(as.numeric(difftime(Sys.time(),
-                                        file.info("SiteandMethods")$mtime,
-                                        units = "days")), 1)
-  cat("✓ Wader data is current (", age_days, "days old) — skipping download\n")
+  age_days <- round(as.numeric(difftime(
+    Sys.time(), file.info("SiteandMethods")$mtime, units = "days"
+  )), 1)
+  cat("✓ Wader data current (", age_days, "days old) — skipping download\n")
 }
 
-# Create cache directory if needed
+# 2. Water covariate data  (writes WaterData/eden_covariates.csv)
+cat("Pre-caching water covariate data...\n")
+tryCatch({
+  get_data_water()
+  cat("✓ Water covariate data cached\n")
+}, error = function(e) {
+  warning("Water data pre-cache failed: ", e$message)
+})
+
+# 3. Wading bird data — one cache file per spatial level
+#    get_wading_bird_data(cache = TRUE) writes cache/data_<level>.rds
+cat("Pre-caching wading bird data...\n")
+tryCatch({
+  get_wading_bird_data(config = CONFIG, cache = TRUE)
+  cat("✓ Wading bird data cached\n")
+}, error = function(e) {
+  warning("Wading bird data pre-cache failed: ", e$message)
+})
+
+# Create cache directory (non-parallel, before any worker could need it)
 if ((CONFIG$cache$data %||% FALSE) || (CONFIG$cache$models %||% FALSE)) {
   dir.create("cache", showWarnings = FALSE, recursive = TRUE)
   cat("✓ Cache directory ready\n")
 }
 
+cat("\n✓ All shared artifacts precomputed — safe to start parallel workers\n\n")
+
 # =============================================================================
-# LOAD DATA
+# LOAD DATA  (reads from the cache written above — no worker conflict possible)
 # =============================================================================
 print_section("DATA LOADING")
 
@@ -553,6 +583,9 @@ tryCatch({
 # =============================================================================
 print_banner("ANALYSIS COMPLETE")
 
+elapsed <- difftime(Sys.time(), start_time, units = "mins")
+cat("⏱  Total runtime:", round(as.numeric(elapsed), 1), "minutes\n\n")
+
 cat("📂 Run Folder:", run_folder, "\n\n")
 
 cat("📊 Configuration:\n")
@@ -573,23 +606,22 @@ if (CONFIG$run_mvgam && !is.null(results$mvgam)) {
       summarise(mean_crps = mean(crps, na.rm = TRUE), .groups = "drop") |>
       arrange(mean_crps) |>
       slice(1)
-    
     cat("  • Best model:", best_model$model,
-        glue("(CRPS = {round(best_model$mean_crps, 2)})"), "\n")
+        glue("(mean CRPS = {round(best_model$mean_crps, 3)})"), "\n")
   }
-  cat("\n")
 }
 
 if (CONFIG$run_fable && !is.null(results$fable)) {
   cat("🟢 fable Results:\n")
   cat("  • Models:",      paste(CONFIG$models$fable, collapse = ", "), "\n")
   cat("  • Forecasts:",   nrow(results$fable$forecasts), "\n")
-  cat("  • Metric rows:", nrow(results$fable$metrics), "\n\n")
+  cat("  • Metric rows:", nrow(results$fable$metrics), "\n")
 }
+
+cat("\n")
 
 end_time <- Sys.time()
 runtime  <- difftime(end_time, start_time, units = "mins")
-
 cat("⏱️  Runtime:", round(runtime, 1), "minutes\n")
 cat("💾 All results saved to:", run_folder, "\n")
 cat("✅ Analysis complete at:", format(end_time, "%Y-%m-%d %H:%M:%S"), "\n\n")
