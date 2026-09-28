@@ -4,7 +4,6 @@
 # Computes per-window skill delta: skill_system_t - skill_subregion_t
 # Works for both species-level and total count forecasting modes
 # =============================================================================
-
 # config loaded via config::get() directly — do not use library(config)
 library(dplyr)
 library(ggplot2)
@@ -19,24 +18,51 @@ library(stringr)
 SPECIES_TO_RUN   <- "top6"
 FORECAST_TOTALS  <- FALSE
 SCALES_TO_RUN    <- c("system", "subregion")
-
-
-# FABLE_MODELS     <- c("arima", "tslm", "arima_exog", "gam")
 FABLE_MODELS     <- c()
 MVGAM_MODELS     <- c("ar", "ar_exog", "ar_exog_plus")
-# MVGAM_MODELS     <- c()
-
-
-PARALLEL         <- TRUE   # Set to FALSE to run sequentially
-PARALLEL_WORKERS <- 3      # Number of parallel workers (ignored if PARALLEL = FALSE)
+PARALLEL         <- TRUE
+PARALLEL_WORKERS <- 3
 
 # =============================================================================
-# PRE-DOWNLOAD DATA TO PREVENT PARALLEL RACE CONDITIONS
+# SERIAL PRECOMPUTE OF ALL SHARED ARTIFACTS
+# Must complete before any parallel workers start.
+# Mirrors the precompute block in main.R [1].
 # =============================================================================
-if (!dir.exists("SiteandMethods") || difftime(Sys.time(), file.info("SiteandMethods")$mtime, units = "days") > 7) {
-  cat("Pre-downloading wader observation data...\n")
-  wader::download_observations(".")
+cat("Precomputing shared data artifacts...\n")
+
+needs_download <- !dir.exists("SiteandMethods") || {
+  stamp <- file.info("SiteandMethods")$mtime
+  is.na(stamp) || difftime(Sys.time(), stamp, units = "days") > 7
 }
+if (needs_download) {
+  cat("  Downloading wader observation data...\n")
+  wader::download_observations(".")
+  cat("  ✓ Wader observation data downloaded\n")
+} else {
+  cat("  ✓ Wader observation data current — skipping download\n")
+}
+
+cat("  Pre-caching water covariate data...\n")
+tryCatch({
+  get_data_water()
+  cat("  ✓ Water covariate data cached\n")
+}, error = function(e) warning("Water data pre-cache failed: ", e$message))
+
+cat("  Pre-caching wading bird data...\n")
+tryCatch({
+  # Load base config just enough to call get_wading_bird_data() for each scale
+  tmp_cfg <- config::get(config = "run_all_scales_all")
+  tmp_cfg$spatial$include_species <- SPECIES_TO_RUN
+  tmp_cfg$spatial$forecast_totals <- FORECAST_TOTALS
+  for (sc in SCALES_TO_RUN) {
+    tmp_cfg$spatial$level <- sc
+    get_wading_bird_data(config = tmp_cfg, cache = TRUE)
+    cat(glue("  ✓ Wading bird data cached for scale: {sc}\n"))
+  }
+}, error = function(e) warning("Wading bird data pre-cache failed: ", e$message))
+
+dir.create("cache", showWarnings = FALSE, recursive = TRUE)
+cat("✓ All shared artifacts precomputed — safe to start parallel workers\n\n")
 
 # =============================================================================
 # SOURCE PARALLEL UTILITIES
@@ -116,18 +142,12 @@ if (length(models_to_test) == 0)
   stop("!!!! - No models specified! Please add models to MVGAM_MODELS or FABLE_MODELS")
 
 cat("📋 Models to test:", length(models_to_test), "\n")
-for (model_key in names(models_to_test)) cat("  •", model_key, "\n")
+for (mk in names(models_to_test)) cat("  •", mk, "\n")
 cat("\n")
 
 # =============================================================================
 # PART 1: RUN EACH MODEL ACROSS ALL SCALES
 # =============================================================================
-
-# -----------------------------------------------------------------------------
-# Refactored model runner — one model across all scales
-# NOTE: CONFIG$parallel$enabled stays FALSE inside each main.R call
-#       to avoid nested parallelism with Stan
-# -----------------------------------------------------------------------------
 run_single_model <- function(model_key) {
   
   assign("base_profile", "run_all_scales_all", envir = .GlobalEnv)
@@ -158,6 +178,8 @@ run_single_model <- function(model_key) {
     CONFIG$spatial$run_by_region <- current_scale != "system"
     CONFIG$.skip_config_init     <- TRUE
     CONFIG$parallel$enabled      <- FALSE
+    # FIX: embed model_key so main.R [1] builds a unique run_folder per worker
+    CONFIG$model_key             <- model_key
     
     if (framework == "mvgam") {
       CONFIG$models$mvgam <- c("baseline", model_name)
@@ -175,13 +197,20 @@ run_single_model <- function(model_key) {
     
     if (framework == "mvgam") {
       model_file <- file.path("models", paste0("mvgam_", model_name, ".R"))
-      if (file.exists(model_file)) { source(model_file, local = FALSE); cat(glue("  ✓ Pre-loaded {model_name}\n")) }
+      if (file.exists(model_file)) {
+        source(model_file, local = FALSE)
+        cat(glue("  ✓ Pre-loaded {model_name}\n"))
+      }
       baseline_file <- file.path("models", "mvgam_baseline.R")
-      if (file.exists(baseline_file)) { source(baseline_file, local = FALSE); cat("  ✓ Pre-loaded baseline\n") }
+      if (file.exists(baseline_file)) {
+        source(baseline_file, local = FALSE)
+        cat("  ✓ Pre-loaded baseline\n")
+      }
     }
     
     # -------------------------------------------------------------------------
-    # Run with tryCatch — capture both errors and the run_folder result
+    # Run main.R — capture run_folder from .GlobalEnv after sourcing
+    # FIX: check .GlobalEnv explicitly; source() sets run_folder there
     # -------------------------------------------------------------------------
     run_succeeded <- FALSE
     run_folder    <- NULL
@@ -189,16 +218,18 @@ run_single_model <- function(model_key) {
     tryCatch({
       source("main.R")
       
-      # Verify run_folder was actually created and contains results
-      if (!exists("run_folder") || is.null(run_folder)) {
-        stop("main.R completed but run_folder was not set")
+      # Read run_folder back from .GlobalEnv where main.R assigned it
+      run_folder <- base::get("run_folder", envir = .GlobalEnv, inherits = FALSE)
+      
+      if (is.null(run_folder)) {
+        stop("main.R completed but run_folder was not set in .GlobalEnv")
       }
       if (!dir.exists(run_folder)) {
-        stop(glue("run_folder was set to '{run_folder}' but directory does not exist"))
+        stop(glue("run_folder '{run_folder}' does not exist"))
       }
       rds_path <- file.path(run_folder, "forecast_results.rds")
       if (!file.exists(rds_path)) {
-        stop(glue("run_folder exists but forecast_results.rds is missing: {rds_path}"))
+        stop(glue("forecast_results.rds missing from: {rds_path}"))
       }
       
       run_succeeded <- TRUE
@@ -206,11 +237,15 @@ run_single_model <- function(model_key) {
     }, error = function(e) {
       cat(glue("\n  ✗ {model_key} at {current_scale} FAILED\n"))
       cat(glue("    Reason: {e$message}\n"))
-      cat(glue("    run_folder at time of error: {if (exists('run_folder') && !is.null(run_folder)) run_folder else 'not set'}\n"))
+      rf <- tryCatch(
+        base::get("run_folder", envir = .GlobalEnv, inherits = FALSE),
+        error = function(e2) NULL
+      )
+      cat(glue("    run_folder at error: {if (!is.null(rf)) rf else 'not set'}\n"))
     })
     
     # -------------------------------------------------------------------------
-    # Only copy results if run genuinely succeeded
+    # Copy results to model/scale subfolder, then delete the temp run_folder
     # -------------------------------------------------------------------------
     if (run_succeeded && !is.null(run_folder)) {
       
@@ -222,7 +257,8 @@ run_single_model <- function(model_key) {
         model_scale_results[[current_scale]] <- NULL
       } else {
         for (src_file in files_to_copy) {
-          rel_path  <- sub(paste0(run_folder, "/"), "", src_file)
+          rel_path  <- sub(paste0(normalizePath(run_folder), .Platform$file.sep), "", 
+                           normalizePath(src_file), fixed = TRUE)
           dest_file <- file.path(dest_folder, rel_path)
           dir.create(dirname(dest_file), recursive = TRUE, showWarnings = FALSE)
           file.copy(src_file, dest_file, overwrite = TRUE)
@@ -234,15 +270,18 @@ run_single_model <- function(model_key) {
       
     } else {
       
-      # Log a diagnostic summary to a file so failures aren't lost silently
       fail_log <- file.path(model_folder, glue("FAILED_{current_scale}.txt"))
+      rf_val   <- tryCatch(
+        base::get("run_folder", envir = .GlobalEnv, inherits = FALSE),
+        error = function(e) NULL
+      )
       writeLines(c(
-        glue("Model:  {model_key}"),
-        glue("Scale:  {current_scale}"),
-        glue("Time:   {format(Sys.time())}"),
-        glue("run_folder: {if (exists('run_folder') && !is.null(run_folder)) run_folder else 'not set'}"),
+        glue("Model:      {model_key}"),
+        glue("Scale:      {current_scale}"),
+        glue("Time:       {format(Sys.time())}"),
+        glue("run_folder: {if (!is.null(rf_val)) rf_val else 'not set'}"),
         "",
-        "Check that main.R completes without error for this scale and saves forecast_results.rds."
+        "Check that main.R completes without error and saves forecast_results.rds."
       ), fail_log)
       
       cat(glue("  ✗ Failure logged to: {fail_log}\n"))
@@ -252,7 +291,6 @@ run_single_model <- function(model_key) {
     gc()
   }
   
-  # Report which scales succeeded and which failed
   cat(glue("\n✓ {model_key} complete\n"))
   succeeded <- names(Filter(Negate(is.null), model_scale_results))
   failed    <- setdiff(SCALES_TO_RUN, succeeded)
@@ -263,7 +301,7 @@ run_single_model <- function(model_key) {
 }
 
 # -----------------------------------------------------------------------------
-# Run models — parallel or sequential based on PARALLEL flag
+# Run models — parallel or sequential
 # -----------------------------------------------------------------------------
 if (PARALLEL) {
   all_model_results <- run_models_parallel(
@@ -283,9 +321,6 @@ cat("\n✅ ALL MODEL RUNS COMPLETE!\n\n")
 # =============================================================================
 cat("📊 Extracting per-window skill scores and computing scale deltas...\n\n")
 
-# -----------------------------------------------------------------------------
-# HELPER: extract window-level metrics from a results folder
-# -----------------------------------------------------------------------------
 extract_model_metrics <- function(folder_path, scale_name, framework) {
   file_path <- file.path(folder_path, "forecast_results.rds")
   if (!file.exists(file_path)) return(NULL)
@@ -306,7 +341,7 @@ extract_model_metrics <- function(folder_path, scale_name, framework) {
   
   metrics |>
     as_tibble() |>
-    select(
+    dplyr::select(
       model,
       any_of(c("species", "region")),
       window,
@@ -316,9 +351,6 @@ extract_model_metrics <- function(folder_path, scale_name, framework) {
     mutate(framework = framework, scale = scale_name)
 }
 
-# -----------------------------------------------------------------------------
-# Collect window-level metrics across all models and scales
-# -----------------------------------------------------------------------------
 all_window_metrics <- bind_rows(lapply(names(all_model_results), function(model_key) {
   model_info    <- models_to_test[[model_key]]
   framework     <- model_info$framework
@@ -343,6 +375,9 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
     names(all_window_metrics)
   )
   
+  # FIX: replaced pick(everything()) inside if() with a plain names() check
+  has_test_start <- "test_start" %in% names(all_window_metrics)
+  
   window_long <- all_window_metrics |>
     pivot_longer(
       cols      = all_of(skill_metrics),
@@ -360,7 +395,7 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
       ),
       window_start_year = extract_window_start_year(
         window,
-        if ("test_start" %in% names(pick(everything()))) test_start else NULL
+        if (has_test_start) test_start else NULL
       )
     )
   
@@ -384,7 +419,10 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
       filter(model_key == mk) |>
       mutate(scale = factor(scale, levels = SCALES_TO_RUN))
     
-    if (nrow(model_long) == 0) { cat(glue("  ⚠ No data for {mk}, skipping.\n")); next }
+    if (nrow(model_long) == 0) {
+      cat(glue("  ⚠ No data for {mk}, skipping.\n"))
+      next
+    }
     
     if (!FORECAST_TOTALS && "species" %in% names(model_long)) {
       model_long <- model_long |> mutate(entity = species)
@@ -478,9 +516,9 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
       scale_x_continuous(name = "Forecast Window Start Year", breaks = year_breaks_delta) +
       theme_classic(base_size = 12) +
       labs(
-        title    = glue("{mk}: Skill Delta per Window (System − Subregion)"),
+        title    = glue("{mk}: Skill Delta per Window (System \u2212 Subregion)"),
         subtitle = "Positive = system outperforms subregion | Negative = subregion wins",
-        y        = "Δ Skill Score (system − subregion)",
+        y        = "\u0394 Skill Score (system \u2212 subregion)",
         color    = "Metric"
       ) +
       theme(
@@ -507,8 +545,12 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
   }
   
   # ===========================================================================
-  # CROSS-MODEL DELTA PLOT (all_models_window_delta.png)
+  # CROSS-MODEL DELTA PLOT
   # ===========================================================================
+  # FIX: initialise cross_delta to NULL so the downstream exists() check is
+  # always well-defined even when the if-block below is skipped
+  cross_delta <- NULL
+  
   if (all(c("system", "subregion") %in% SCALES_TO_RUN)) {
     
     cat("\n📊 Generating cross-model delta plot...\n")
@@ -553,9 +595,9 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
         scale_x_continuous(name = "Forecast Window Start Year", breaks = cross_year_breaks) +
         theme_classic(base_size = 12) +
         labs(
-          title    = "All Models: Skill Delta per Window (System − Subregion)",
+          title    = "All Models: Skill Delta per Window (System \u2212 Subregion)",
           subtitle = "Positive = system outperforms subregion | Negative = subregion wins",
-          y        = "Δ Skill Score (system − subregion)",
+          y        = "\u0394 Skill Score (system \u2212 subregion)",
           color    = "Model"
         ) +
         theme(
@@ -579,21 +621,24 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
                 file.path(scale_run_folder, "all_models_window_delta.csv"),
                 row.names = FALSE)
       cat("  ✓ Saved: all_models_window_delta.csv\n")
+      
+    } else {
+      cross_delta <- NULL
     }
   }
   
   # ===========================================================================
   # CROSS-MODEL DELTA PLOTS: Density, ECDF, Violin
   # ===========================================================================
-  if (exists("cross_delta") && nrow(cross_delta) > 0) {
+  if (!is.null(cross_delta) && nrow(cross_delta) > 0) {
     
     p_delta_density <- ggplot(cross_delta,
                               aes(x = delta_skill, fill = model_key, color = model_key)) +
       geom_density(alpha = 0.15, linewidth = 1.1) +
       geom_vline(xintercept = 0, linetype = "dashed", color = "gray40", linewidth = 0.7) +
-      annotate("text", x = -0.05, y = Inf, label = "← Subregion better",
+      annotate("text", x = -0.05, y = Inf, label = "\u2190 Subregion better",
                hjust = 1, vjust = 1.5, size = 3.5, color = "gray40") +
-      annotate("text", x =  0.05, y = Inf, label = "System better →",
+      annotate("text", x =  0.05, y = Inf, label = "System better \u2192",
                hjust = 0, vjust = 1.5, size = 3.5, color = "gray40") +
       facet_wrap(~metric_label, ncol = 1, scales = "free_y") +
       scale_fill_brewer(palette  = "Dark2") +
@@ -601,8 +646,8 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
       theme_classic(base_size = 13) +
       labs(
         title    = "All Models: Distribution of Skill Delta",
-        subtitle = "System − Subregion | Positive = system wins | Negative = subregion wins",
-        x        = "Δ Skill Score (system − subregion)",
+        subtitle = "System \u2212 Subregion | Positive = system wins | Negative = subregion wins",
+        x        = "\u0394 Skill Score (system \u2212 subregion)",
         y        = "Density", fill = "Model", color = "Model"
       ) +
       theme(
@@ -622,17 +667,17 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
                            aes(x = delta_skill, color = model_key)) +
       stat_ecdf(linewidth = 1.2) +
       geom_vline(xintercept = 0, linetype = "dashed", color = "gray40", linewidth = 0.7) +
-      annotate("text", x = -0.05, y = 0.5, label = "← Subregion better",
+      annotate("text", x = -0.05, y = 0.5, label = "\u2190 Subregion better",
                hjust = 1, size = 3.5, color = "gray40") +
-      annotate("text", x =  0.05, y = 0.5, label = "System better →",
+      annotate("text", x =  0.05, y = 0.5, label = "System better \u2192",
                hjust = 0, size = 3.5, color = "gray40") +
       facet_wrap(~metric_label, ncol = 1, scales = "free_x") +
       scale_color_brewer(palette = "Dark2") +
       theme_classic(base_size = 13) +
       labs(
         title    = "All Models: ECDF of Skill Delta",
-        subtitle = "System − Subregion | Positive = system wins | Negative = subregion wins",
-        x        = "Δ Skill Score (system − subregion)",
+        subtitle = "System \u2212 Subregion | Positive = system wins | Negative = subregion wins",
+        x        = "\u0394 Skill Score (system \u2212 subregion)",
         y        = "Cumulative Probability", color = "Model"
       ) +
       theme(
@@ -659,10 +704,10 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
       scale_color_brewer(palette = "Dark2") +
       theme_classic(base_size = 13) +
       labs(
-        title    = "All Models: Skill Delta Distribution (System − Subregion)",
+        title    = "All Models: Skill Delta Distribution (System \u2212 Subregion)",
         subtitle = "Positive = system wins | Negative = subregion wins | Line = median",
         x        = NULL,
-        y        = "Δ Skill Score (system − subregion)",
+        y        = "\u0394 Skill Score (system \u2212 subregion)",
         fill     = "Model", color = "Model"
       ) +
       theme(
@@ -717,8 +762,8 @@ cat("  • all_models_window_delta.csv    - Cross-model delta table\n")
 cat("  • all_models_summary.csv         - Aggregated summary across windows\n\n")
 for (model_key in names(all_model_results)) {
   cat(glue("  • {model_key}/\n"))
-  cat(glue("    ├── window_skill_by_scale.png  - Skill per window by scale\n"))
-  cat(glue("    ├── window_delta_skill.png     - Delta per window\n"))
-  cat(glue("    ├── window_delta_skill.csv     - Delta table\n"))
-  for (scale in SCALES_TO_RUN) cat(glue("    ├── {scale}/\n"))
+  cat(glue("    \u251c\u2500\u2500 window_skill_by_scale.png  - Skill per window by scale\n"))
+  cat(glue("    \u251c\u2500\u2500 window_delta_skill.png     - Delta per window\n"))
+  cat(glue("    \u251c\u2500\u2500 window_delta_skill.csv     - Delta table\n"))
+  for (scale in SCALES_TO_RUN) cat(glue("    \u251c\u2500\u2500 {scale}/\n"))
 }

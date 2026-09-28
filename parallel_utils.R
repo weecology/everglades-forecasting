@@ -30,7 +30,7 @@ setup_parallel <- function(enabled = TRUE, workers = NULL) {
 
 teardown_parallel <- function() {
   plan(sequential)
-  conflicted::conflicts_prefer(base::get(), .quiet = TRUE)
+  conflicted::conflicts_prefer(base::get, .quiet = TRUE)
   cat("✓ Parallel plan reset to sequential\n")
 }
 
