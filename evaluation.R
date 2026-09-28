@@ -16,6 +16,18 @@ library(future)
 library(furrr)
 library(progressr)
 
+
+# Handle namespace conflicts for the test harness
+conflicted::conflicts_prefer(dplyr::filter,   .quiet = TRUE)
+conflicted::conflicts_prefer(dplyr::select,   .quiet = TRUE)
+conflicted::conflicts_prefer(mvgam::AR,       .quiet = TRUE)
+conflicted::conflicts_prefer(mvgam::VAR,      .quiet = TRUE)
+conflicted::conflicts_prefer(mvgam::RW,       .quiet = TRUE)
+conflicted::conflicts_prefer(base::as.matrix, .quiet = TRUE)
+conflicted::conflicts_prefer(base::get,       .quiet = TRUE)
+
+
+
 # =============================================================================
 # PARALLEL PROCESSING
 # =============================================================================

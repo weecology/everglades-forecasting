@@ -1,20 +1,19 @@
 # =============================================================================
 # TEST_HARNESS.R - Isolated testing of pipeline components
 # =============================================================================
-
 library(dplyr)
 library(mvgam)
 library(glue)
-
-# Ensure no parallel processing
 library(future)
-plan(sequential)  
 
-
-
-# add some log scores???
-
-
+# Handle namespace conflicts for the test harness
+conflicted::conflicts_prefer(dplyr::filter,   .quiet = TRUE)
+conflicted::conflicts_prefer(dplyr::select,   .quiet = TRUE)
+conflicted::conflicts_prefer(mvgam::AR,       .quiet = TRUE)
+conflicted::conflicts_prefer(mvgam::VAR,      .quiet = TRUE)
+conflicted::conflicts_prefer(mvgam::RW,       .quiet = TRUE)
+conflicted::conflicts_prefer(base::as.matrix, .quiet = TRUE)
+conflicted::conflicts_prefer(base::get,       .quiet = TRUE)
 
 # Load necessary functions
 source("data_functions.R")
@@ -23,17 +22,16 @@ source("evaluation.R")
 # =============================================================================
 # CONFIGURATION FOR TESTING
 # =============================================================================
-
 # Minimal test configuration
 TEST_CONFIG <- list(
   # Data settings
   spatial = list(
-    level = "subregion",  # "system", "subregion", "colony"
-    include_species = c('all'),  # Just 2 species for speed
+    level = "subregion",  
+    include_species = c('all'),  
     include_unknowns = FALSE,
     forecast_totals = TRUE,
-    run_by_region = FALSE, 
-    exclude_regions = c("bigcypress", "coastal")   #don't have water data for these yet... 
+    run_by_region = FALSE,
+    exclude_regions = c("bigcypress", "coastal") 
   ),
   
   # Minimal MCMC for fast testing
@@ -44,10 +42,10 @@ TEST_CONFIG <- list(
   # CV settings
   train_years = 5,
   test_years = 1,
-  cv_windows = 1,  # Just test ONE window
+  cv_windows = 1, 
   
   # Evaluation
-  use_ordinal = FALSE,  # Disable for speed
+  use_ordinal = FALSE,  
   ordinal_years = "All",
   ordinal_breaks = c(0.33, 0.67, 0.90),
   sliding_window_breaks = FALSE,
@@ -55,10 +53,10 @@ TEST_CONFIG <- list(
   # Model settings
   family = "nb",
   
-  # Parallel (disable for easier debugging)
+  # Parallel 
   parallel = list(
-    enabled = FALSE,
-    workers = NULL
+    enabled = TRUE,
+    workers = 2
   ),
   
   # Cache
@@ -82,14 +80,16 @@ CONFIG <- TEST_CONFIG
 #' @param model_name Name of the model (e.g., "baseline", "ar", "trait")
 #' @param framework Either "mvgam" or "fable"
 #' @param use_full_data If FALSE, uses only recent years
-test_single_model <- function(model_name, 
+#' @param parallel If TRUE, runs CV windows in parallel
+#' @param workers Number of parallel workers (defaults to auto-detect if NULL)
+test_single_model <- function(model_name,
                               framework = "mvgam",
-                              use_full_data = FALSE) {
-  
-
+                              use_full_data = FALSE,
+                              parallel = FALSE,
+                              workers = NULL) {
   
   cat("\n", paste(rep("=", 70), collapse = ""), "\n", sep = "")
-  cat(glue("TESTING: {framework}_{model_name}\n"))
+  cat(glue("TESTING: {framework}_{model_name} (Parallel: {parallel})\n"))
   cat(paste(rep("=", 70), collapse = ""), "\n\n", sep = "")
   
   # Load data
@@ -115,15 +115,22 @@ test_single_model <- function(model_name,
     source(model_file)
     cat(glue("✓ Loaded {model_file}\n\n"))
     
-    # Run the model through CV
+    # Run the model through CV with dynamic parallel arguments and wrapper fix
     results <- fit_sliding_window(
       data = data,
-      make_forecast = make_mvgam_forecasts,
+      # --- WRAPPER FOR PARALLEL WORKERS ---
+      make_forecast = function(train, test, ...) {
+        source("evaluation.R", local = FALSE)
+        source(file.path("models", "mvgam_baseline.R"), local = FALSE)
+        source(file.path("models", paste0("mvgam_", model_name, ".R")), local = FALSE)
+        make_mvgam_forecasts(train, test, ...)
+      },
+      # ------------------------------------
       train_years = CONFIG$train_years,
       test_years = CONFIG$test_years,
       cv_windows = CONFIG$cv_windows,
-      parallel = FALSE,
-      workers = NULL,
+      parallel = parallel,
+      workers = workers,
       models_to_run = model_name,
       use_ordinal = CONFIG$use_ordinal,
       precomputed_breaks = NULL
@@ -135,12 +142,18 @@ test_single_model <- function(model_name,
     
     results <- fit_sliding_window(
       data = data,
-      make_forecast = make_fable_forecasts,
+      # --- WRAPPER FOR PARALLEL WORKERS ---
+      make_forecast = function(train, test, ...) {
+        source("evaluation.R", local = FALSE)
+        source("models/fable_models.R", local = FALSE)
+        make_fable_forecasts(train, test, ...)
+      },
+      # ------------------------------------
       train_years = CONFIG$train_years,
       test_years = CONFIG$test_years,
       cv_windows = CONFIG$cv_windows,
-      parallel = FALSE,
-      workers = NULL,
+      parallel = parallel,
+      workers = workers,
       models_to_run = model_name,
       use_ordinal = CONFIG$use_ordinal
     )
@@ -168,8 +181,6 @@ test_single_window <- function(model_name,
                                train_start = 2010,
                                test_start = 2015,
                                framework = "mvgam") {
-  
-
   
   cat("\n", paste(rep("=", 70), collapse = ""), "\n", sep = "")
   cat(glue("TESTING SINGLE WINDOW: {train_start}-{test_start-1} → {test_start}\n"))
@@ -225,7 +236,6 @@ test_single_window <- function(model_name,
 
 #' Test data loading with different configurations
 test_data_loading <- function() {
- 
   
   cat("\n", paste(rep("=", 70), collapse = ""), "\n", sep = "")
   cat("TESTING DATA LOADING\n")
@@ -257,24 +267,19 @@ test_data_loading <- function() {
 # =============================================================================
 # EXAMPLE USAGE
 # =============================================================================
-
 # Uncomment the test you want to run:
-
 # Test baseline model quickly
 # test_single_model("baseline", framework = "mvgam", use_full_data = FALSE)
-
 # Test trait model with full data
 # test_single_model("trait", framework = "mvgam", use_full_data = TRUE)
-
 # Test a specific window
 # test_single_window("baseline", train_start = 2010, test_start = 2018)
-
 # Test data loading
 # test_data_loading()
 
 cat("\n✓ Test harness loaded. Run test functions as needed.\n")
 cat("Examples:\n")
 cat("  test_single_model('baseline')\n")
-cat("  test_single_model('ar', use_full_data = TRUE)\n")
+cat("  test_single_model('ar', use_full_data = TRUE, parallel = TRUE)\n")
 cat("  test_single_window('baseline', train_start = 2010, test_start = 2018)\n")
 cat("  test_data_loading()\n\n")
