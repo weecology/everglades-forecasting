@@ -1,7 +1,6 @@
 # =============================================================================
 # install_packages.R
 # =============================================================================
-
 # Personal library
 lib_path <- "~/R/libs"
 dir.create(lib_path, recursive = TRUE, showWarnings = FALSE)
@@ -20,35 +19,40 @@ cran_packages <- c(
   # Parallel
   "future", "furrr", "progressr",
   # Config & utils
-  "config", "conflicted",
-  # Stan interface
-  "cmdstanr"
+  "config", "conflicted"
+  # (cmdstanr removed from here because it needs a special repo)
 )
 
 install.packages(
   cran_packages,
   lib     = lib_path,
   repos   = "https://cloud.r-project.org",
-  Ncpus   = 4   # parallelise the build
+  Ncpus   = 4   
 )
+
+# Install spatial packages with explicit lib and repo
+install.packages(c('sf', 'stars', 'units'), lib = lib_path, repos = "https://cloud.r-project.org")
+
+# Install cmdstanr from its custom repository
+install.packages("cmdstanr", lib = lib_path, repos = c("https://stan-dev.r-universe.dev", "https://cloud.r-project.org"))
 
 # =============================================================================
 # GITHUB PACKAGES
 # =============================================================================
 install.packages("remotes", lib = lib_path, repos = "https://cloud.r-project.org")
-
 remotes::install_github("weecology/edenR", lib = lib_path, upgrade = "never")
 remotes::install_github("weecology/wader",  lib = lib_path, upgrade = "never")
 
 # =============================================================================
 # CMDSTAN
 # =============================================================================
+library(cmdstanr)
 cmdstanr::install_cmdstan(cores = 8)
 
 # =============================================================================
 # VERIFY
 # =============================================================================
-pkgs <- c(cran_packages, "edenR", "wader")
+pkgs <- c(cran_packages, "sf", "stars", "units", "cmdstanr", "edenR", "wader")
 missing <- pkgs[!pkgs %in% installed.packages(lib.loc = lib_path)[, "Package"]]
 if (length(missing) == 0) {
   cat("✓ All packages installed successfully\n")

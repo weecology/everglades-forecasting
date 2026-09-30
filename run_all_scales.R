@@ -20,7 +20,7 @@ FORECAST_TOTALS  <- TRUE
 SCALES_TO_RUN    <- c("system", "subregion")
 FABLE_MODELS     <- c()
 MVGAM_MODELS     <- c("ar", "ar_exog")#, "ar_exog_plus")
-# PARALLEL         <- TRUE
+PARALLEL         <- TRUE
 PARALLEL_WORKERS <- 3
 
 # =============================================================================
@@ -257,8 +257,9 @@ run_single_model <- function(model_key) {
         model_scale_results[[current_scale]] <- NULL
       } else {
         for (src_file in files_to_copy) {
-          rel_path  <- sub(paste0(normalizePath(run_folder), .Platform$file.sep), "", 
-                           normalizePath(src_file), fixed = TRUE)
+          # Use fs::path_rel to safely extract the relative path
+          rel_path  <- fs::path_rel(src_file, start = run_folder)
+          
           dest_file <- file.path(dest_folder, rel_path)
           dir.create(dirname(dest_file), recursive = TRUE, showWarnings = FALSE)
           file.copy(src_file, dest_file, overwrite = TRUE)

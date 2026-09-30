@@ -33,7 +33,7 @@ get_data_water <- function(eden_path = "WaterData", update = FALSE, max_age_days
   
   if (needs_update) {
     cat("📥 Downloading fresh EDEN water data...\n")
-    update_water(eden_path)
+    edenR::update_water(eden_path)
     water <- get_eden_covariates(eden_path = eden_path, level = "subregions") |>
       bind_rows(get_eden_covariates(eden_path = eden_path, level = "all")) |>
       bind_rows(get_eden_covariates(eden_path = eden_path, level = "wcas")) |>
