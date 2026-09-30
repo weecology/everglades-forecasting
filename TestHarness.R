@@ -45,7 +45,7 @@ TEST_CONFIG <- list(
   cv_windows = 1, 
   
   # Evaluation
-  use_ordinal = FALSE,  
+  use_ordinal = TRUE,  
   ordinal_years = "All",
   ordinal_breaks = c(0.33, 0.67, 0.90),
   sliding_window_breaks = FALSE,
