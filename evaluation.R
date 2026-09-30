@@ -12,6 +12,14 @@ library(future)
 library(furrr)
 library(progressr)
 
+
+guard_config_init <- function() {
+  if (isTRUE(CONFIG$.skip_config_init)) {
+    cat("ℹ CONFIG already initialized by run_all_scales.R — skipping config::get()\n")
+    return(invisible(NULL))
+  }
+}
+
 # =============================================================================
 # PARALLEL PROCESSING
 # =============================================================================
