@@ -32,6 +32,10 @@ setup_parallel <- function(enabled = TRUE, workers = NULL) {
   return(list(enabled = TRUE, workers = workers))
 }
 
+teardown_parallel <- function() {
+  plan(sequential)
+}
+
 # =============================================================================
 # SLIDING WINDOW CROSS-VALIDATION
 # =============================================================================
