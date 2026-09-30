@@ -16,11 +16,11 @@ library(stringr)
 # CONFIGURATION - EDIT THIS SECTION
 # =============================================================================
 SPECIES_TO_RUN   <- "top6"
-FORECAST_TOTALS  <- FALSE
+FORECAST_TOTALS  <- TRUE
 SCALES_TO_RUN    <- c("system", "subregion")
 FABLE_MODELS     <- c()
-MVGAM_MODELS     <- c("ar", "ar_exog", "ar_exog_plus")
-PARALLEL         <- TRUE
+MVGAM_MODELS     <- c("ar", "ar_exog")#, "ar_exog_plus")
+# PARALLEL         <- TRUE
 PARALLEL_WORKERS <- 3
 
 # =============================================================================
