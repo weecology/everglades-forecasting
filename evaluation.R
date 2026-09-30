@@ -47,6 +47,10 @@ setup_parallel <- function(enabled = TRUE, workers = NULL) {
   return(list(enabled = TRUE, workers = workers))
 }
 
+teardown_parallel <- function() {
+  plan(sequential)
+}
+
 # =============================================================================
 # SLIDING WINDOW CROSS-VALIDATION
 # =============================================================================
@@ -61,6 +65,8 @@ fit_sliding_window <- function(data, make_forecast, train_years, test_years,
   
   if (parallel) {
     parallel_config <- setup_parallel(enabled = TRUE, workers = workers)
+    # Always reset the future plan, even if a CV worker errors.
+    on.exit(teardown_parallel(), add = TRUE)
   } else {
     parallel_config <- setup_parallel(enabled = FALSE)
   }

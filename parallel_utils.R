@@ -20,7 +20,7 @@ setup_parallel <- function(enabled = TRUE, workers = NULL) {
   }
   
   # Resolve get() conflict before furrr/future setup
-  conflicted::conflicts_prefer(base::get(), .quiet = TRUE)
+  conflicted::conflicts_prefer(base::get, .quiet = TRUE)
   
   plan(multisession, workers = workers)
   cat(glue("✓ Parallel processing enabled: {workers} workers\n"))
@@ -37,6 +37,8 @@ teardown_parallel <- function() {
 run_models_parallel <- function(model_keys, run_fn, workers = NULL) {
   
   setup_parallel(enabled = TRUE, workers = min(length(model_keys), workers %||% 3))
+  # Always reset the future plan, even if a model worker errors.
+  on.exit(teardown_parallel(), add = TRUE)
   
   # Enable progress reporting in the console
   progressr::handlers(global = TRUE)
@@ -72,7 +74,6 @@ run_models_parallel <- function(model_keys, run_fn, workers = NULL) {
     )
   })
   
-  teardown_parallel()
   names(results) <- model_keys
   return(results)
 }
