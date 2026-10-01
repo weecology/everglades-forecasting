@@ -15,7 +15,7 @@ cran_packages <- c(
   # Visualisation
   "ggplot2", "patchwork", "stringr", "glue",
   # Modelling
-  "mvgam", "distributional", "verification",
+  "mvgam", "distributional", "verification", 
   # Parallel
   "future", "furrr", "progressr",
   # Config & utils
