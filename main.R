@@ -2,10 +2,24 @@
 # MAIN.R - Wading Bird Forecasting Pipeline
 # Optimized for parallel processing and organized output folders
 #
-# FIX 2 (Copilot): guard_config_init() called at top to prevent
-# config::get() from overwriting the per-scale CONFIG built in
-# run_all_scales.R. Defined in evaluation.R.
 # =============================================================================
+
+
+# =============================================================================
+
+# HiPerGator-specific shared library fix
+if (dir.exists("/apps/udunits/2.2.17/lib/")) {
+  dyn.load("/apps/udunits/2.2.17/lib/libudunits2.so.0")
+}
+
+library('units')
+library('sf')
+library('stars')
+
+
+# =============================================================================
+
+
 start_time <- Sys.time()
 
 # =============================================================================

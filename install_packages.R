@@ -30,8 +30,25 @@ install.packages(
   Ncpus   = 4   
 )
 
+
+
+
 # Install spatial packages with explicit lib and repo
-install.packages(c('sf', 'stars', 'units'), lib = lib_path, repos = "https://cloud.r-project.org")
+# Personal library setup
+lib_path <- "~/R/libs" [2]
+dir.create(lib_path, recursive = TRUE, showWarnings = FALSE)
+.libPaths(lib_path)
+
+# Use RSPM for binaries on HiPerGator (RHEL9)
+hpg_repo <- "https://packagemanager.posit.co/cran/__linux__/rhel9/latest"
+is_hpg <- dir.exists("/apps")
+
+install.packages(c('sf', 'stars', 'units'), 
+                 lib = lib_path, 
+                 repos = if(is_hpg) hpg_repo else "https://cloud.r-project.org") [2]
+
+
+
 
 # Install cmdstanr from its custom repository
 install.packages("cmdstanr", lib = lib_path, repos = c("https://stan-dev.r-universe.dev", "https://cloud.r-project.org"))
