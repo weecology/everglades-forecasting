@@ -4,6 +4,19 @@
 # Computes per-window skill delta: skill_system_t - skill_subregion_t
 # Works for both species-level and total count forecasting modes
 # =============================================================================
+
+# HiPerGator-specific shared library fix
+if (dir.exists("/apps/udunits/2.2.17/lib/")) {
+  dyn.load("/apps/udunits/2.2.17/lib/libudunits2.so.0")
+}
+
+library('units')
+library('sf')
+library('stars')
+
+
+# =============================================================================
+
 # config loaded via config::get() directly — do not use library(config)
 library(dplyr)
 library(ggplot2)
@@ -11,6 +24,14 @@ library(patchwork)
 library(tidyr)
 library(glue)
 library(stringr)
+
+library(conflicted) #conflict of filter and select 
+conflicted::conflicts_prefer(dplyr::filter, .quiet = TRUE)
+conflicted::conflicts_prefer(dplyr::select, .quiet = TRUE)
+
+
+# ADD THIS LINE HERE:
+source("data_functions.R")
 
 # =============================================================================
 # CONFIGURATION - EDIT THIS SECTION
