@@ -45,11 +45,17 @@ dir.create(lib_path, recursive = TRUE, showWarnings = FALSE)
 hpg_repo <- "https://packagemanager.posit.co/cran/__linux__/rhel9/latest"
 is_hpg <- dir.exists("/apps")
 
-install.packages(c('sf', 'stars', 'units'), 
-                 lib = lib_path, 
-                 repos = if(is_hpg) hpg_repo else "https://cloud.r-project.org") 
+# Install units first with explicit udunits2 paths
+install.packages('units',
+                 lib = lib_path,
+                 repos = if(is_hpg) hpg_repo else "https://cloud.r-project.org",
+                 configure.args = '--with-udunits2-lib=/apps/udunits/2.2.17/lib --with-udunits2-include=/apps/udunits/2.2.17/include',
+                 configure.vars = 'CFLAGS=-fexceptions CXXFLAGS=-fexceptions')
 
-
+# Then sf and stars
+install.packages(c('sf', 'stars'),
+                 lib = lib_path,
+                 repos = if(is_hpg) hpg_repo else "https://cloud.r-project.org")
 
 
 # Install cmdstanr from its custom repository
