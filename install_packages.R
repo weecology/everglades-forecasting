@@ -47,7 +47,7 @@ is_hpg <- dir.exists("/apps")
 
 install.packages(c('sf', 'stars', 'units'), 
                  lib = lib_path, 
-                 repos = if(is_hpg) hpg_repo else "https://cloud.r-project.org") [2]
+                 repos = if(is_hpg) hpg_repo else "https://cloud.r-project.org") 
 
 
 
