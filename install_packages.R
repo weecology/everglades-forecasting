@@ -15,7 +15,7 @@ cran_packages <- c(
   # Visualisation
   "ggplot2", "patchwork", "stringr", "glue",
   # Modelling
-  "mvgam", "distributional", "verification", 
+  # "mvgam", "distributional", "verification", 
   # Parallel
   "future", "furrr", "progressr",
   # Config & utils
@@ -35,9 +35,11 @@ install.packages(
 
 # Install spatial packages with explicit lib and repo
 # Personal library setup
-lib_path <- "~/R/libs" [2]
+lib_path <- "~/R/libs"
 dir.create(lib_path, recursive = TRUE, showWarnings = FALSE)
 .libPaths(lib_path)
+
+
 
 # Use RSPM for binaries on HiPerGator (RHEL9)
 hpg_repo <- "https://packagemanager.posit.co/cran/__linux__/rhel9/latest"
