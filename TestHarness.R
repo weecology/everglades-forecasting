@@ -148,6 +148,12 @@ test_single_model <- function(model_name,
       data = data,
       # --- WRAPPER FOR PARALLEL WORKERS ---
       make_forecast = function(train, test, ...) {
+        
+        # Force parallel workers to load UDUNITS (hypergator)
+        if (file.exists("/apps/udunits/2.2.17/lib/libudunits2.so.0")) {
+          dyn.load("/apps/udunits/2.2.17/lib/libudunits2.so.0")
+        }
+        
         source("evaluation.R", local = FALSE)
         source(file.path("models", "mvgam_baseline.R"), local = FALSE)
         source(file.path("models", paste0("mvgam_", model_name, ".R")), local = FALSE)
