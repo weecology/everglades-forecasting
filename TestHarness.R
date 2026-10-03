@@ -5,12 +5,12 @@
 # =============================================================================
 
 # HiPerGator-specific fix for module conflicts
-if (dir.exists("/apps")) {
-  # Manually load UDUNITS without needing the module 'loaded' in the shell
-  if (file.exists("/apps/udunits/2.2.17/lib/libudunits2.so.0")) {
-    dyn.load("/apps/udunits/2.2.17/lib/libudunits2.so.0")
-  }
-}
+# if (dir.exists("/apps")) {
+#   # Manually load UDUNITS without needing the module 'loaded' in the shell
+#   if (file.exists("/apps/udunits/2.2.17/lib/libudunits2.so.0")) {
+#     dyn.load("/apps/udunits/2.2.17/lib/libudunits2.so.0")
+#   }
+# }
 
 # Load the personal library path defined in your setup [2]
 .libPaths("~/R/libs")
