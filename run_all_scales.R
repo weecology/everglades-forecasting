@@ -47,7 +47,7 @@ source("data_functions.R")
 # =============================================================================
 # CONFIGURATION - EDIT THIS SECTION
 # =============================================================================
-SPECIES_TO_RUN   <- "top6"
+SPECIES_TO_RUN   <- c("rosp", "whib")
 FORECAST_TOTALS  <- TRUE
 SCALES_TO_RUN    <- c("system", "subregion")
 FABLE_MODELS     <- c()
