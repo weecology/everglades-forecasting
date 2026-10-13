@@ -6,6 +6,7 @@
 
 # --- Environment-specific setup ----------------------------------------------
 
+<<<<<<< HEAD
 is_hipergator <- dir.exists("/apps")
 
 if (is_hipergator) {
@@ -25,14 +26,27 @@ if (is_hipergator) {
   }
   dyn.load(udunits_library)
 }
+=======
+# HiPerGator-specific fix for module conflicts
+# if (dir.exists("/apps")) {
+#   # Manually load UDUNITS without needing the module 'loaded' in the shell
+#   if (file.exists("/apps/udunits/2.2.17/lib/libudunits2.so.0")) {
+#     dyn.load("/apps/udunits/2.2.17/lib/libudunits2.so.0")
+#   }
+# }
+>>>>>>> weecology/main
 
 # --- Check packages before attaching them -------------------------------------
 
+<<<<<<< HEAD
 required_packages <- c(
   "units", "sf", "stars", "dplyr", "mvgam", "glue",
   "future", "conflicted", "digest", "edenR", "readr",
   "tidyr", "tsibble", "wader", "zoo"
 )
+=======
+# # =============================================================================
+>>>>>>> weecology/main
 
 missing_packages <- required_packages[
   !vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)
@@ -174,7 +188,24 @@ test_single_model <- function(model_name,
     
     results <- fit_sliding_window(
       data = data,
+<<<<<<< HEAD
       make_forecast = make_forecast_fn,
+=======
+      # --- WRAPPER FOR PARALLEL WORKERS ---
+      make_forecast = function(train, test, ...) {
+        
+        # Force parallel workers to load UDUNITS (hypergator)
+        if (file.exists("/apps/udunits/2.2.17/lib/libudunits2.so.0")) {
+          dyn.load("/apps/udunits/2.2.17/lib/libudunits2.so.0")
+        }
+        
+        source("evaluation.R", local = FALSE)
+        source(file.path("models", "mvgam_baseline.R"), local = FALSE)
+        source(file.path("models", paste0("mvgam_", model_name, ".R")), local = FALSE)
+        make_mvgam_forecasts(train, test, ...)
+      },
+      # ------------------------------------
+>>>>>>> weecology/main
       train_years = CONFIG$train_years,
       test_years = CONFIG$test_years,
       cv_windows = CONFIG$cv_windows,
