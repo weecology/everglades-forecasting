@@ -33,8 +33,11 @@ library(dplyr)
 library(ggplot2)
 library(patchwork)
 library(tidyr)
+library(ggExtra)
+library(ggside)
 library(glue)
 library(stringr)
+library(ggside)
 
 library(conflicted) #conflict of filter and select 
 conflicted::conflicts_prefer(dplyr::filter, .quiet = TRUE)
@@ -47,11 +50,11 @@ source("data_functions.R")
 # =============================================================================
 # CONFIGURATION - EDIT THIS SECTION
 # =============================================================================
-SPECIES_TO_RUN   <- c("rosp", "whib")
-FORECAST_TOTALS  <- TRUE
+SPECIES_TO_RUN   <-  c('whib', 'rosp')
+FORECAST_TOTALS  <- FALSE
 SCALES_TO_RUN    <- c("system", "subregion")
-FABLE_MODELS     <- c()
-MVGAM_MODELS     <- c("ar", "ar_exog")#, "ar_exog_plus")
+FABLE_MODELS     <- c('arima', 'arima_exog')
+MVGAM_MODELS     <- c() #"ar", "ar_exog")#, "ar_exog_plus")
 PARALLEL         <- TRUE
 PARALLEL_WORKERS <- 3
 
@@ -777,6 +780,184 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
             file.path(scale_run_folder, "all_models_summary.csv"),
             row.names = FALSE)
   cat("  ✓ Saved: all_models_summary.csv\n")
+}
+
+
+# ===========================================================================
+# Marginal distribution plots
+# ===========================================================================
+# ===========================================================================
+# CROSS-MODEL DELTA PLOT — ggside (faceted) + ggExtra (per panel)
+# ===========================================================================
+
+
+
+
+# FIX: initialise cross_delta to NULL so the downstream exists() check is
+# always well-defined even when the if-block below is skipped
+cross_delta <- NULL
+
+if (all(c("system", "subregion") %in% SCALES_TO_RUN)) {
+  
+  cat("\n📊 Generating cross-model delta plots...\n")
+  
+  cross_id_cols <- intersect(
+    c("model_key",
+      if (!FORECAST_TOTALS) "species",
+      "window", "window_start_year", "test_start", "metric", "metric_label"),
+    names(window_long)
+  )
+  
+  cross_delta <- window_long |>
+    filter(scale %in% c("system", "subregion")) |>
+    group_by(across(all_of(cross_id_cols)), scale) |>
+    summarise(skill_score = mean(skill_score, na.rm = TRUE), .groups = "drop") |>
+    pivot_wider(
+      id_cols     = all_of(cross_id_cols),
+      names_from  = scale,
+      values_from = skill_score,
+      values_fn   = mean
+    ) |>
+    filter(!is.na(system), !is.na(subregion)) |>
+    mutate(delta_skill = system - subregion)
+  
+  if (nrow(cross_delta) > 0) {
+    
+    if (!FORECAST_TOTALS && "species" %in% names(cross_delta)) {
+      cross_delta <- cross_delta |> mutate(entity = species)
+    } else {
+      cross_delta <- cross_delta |> mutate(entity = "Total")
+    }
+    
+    cross_year_breaks <- sort(unique(cross_delta$window_start_year))
+    
+    # =========================================================================
+    # PLOT 1: ggside — single faceted figure with y-axis marginal density
+    # =========================================================================
+    p_cross <- ggplot(cross_delta,
+                      aes(x = window_start_year, y = delta_skill,
+                          color = model_key, group = model_key)) +
+      geom_hline(yintercept = 0, linetype = "dashed",
+                 color = "gray50", linewidth = 0.7) +
+      geom_line(linewidth = 0.9, alpha = 0.8) +
+      geom_point(size = 2, alpha = 0.9) +
+      geom_ysidedensity(
+        aes(x = after_stat(density), fill = model_key),
+        alpha     = 0.20,
+        linewidth = 0.7,
+        position  = "identity"
+      ) +
+      facet_grid(entity ~ metric_label, scales = "free_y") +
+      ggside(scales = "free", y.pos = "right") +
+      scale_x_continuous(name   = "Forecast Window Start Year",
+                         breaks = cross_year_breaks) +
+      scale_color_brewer(palette = "Dark2") +
+      scale_fill_brewer(palette  = "Dark2") +
+      theme_classic(base_size = 12) +
+      labs(
+        title    = "All Models: Skill Delta per Window (System \u2212 Subregion)",
+        subtitle = paste0("Positive = system outperforms subregion | ",
+                          "Negative = subregion wins\n",
+                          "Right strip = marginal distribution of \u0394 skill"),
+        y        = "\u0394 Skill Score (system \u2212 subregion)",
+        color    = "Model",
+        fill     = "Model"
+      ) +
+      theme(
+        legend.position    = "bottom",
+        axis.line          = element_line(linewidth = 1),
+        axis.text.x        = element_text(angle = 45, hjust = 1, size = 9),
+        strip.background   = element_rect(fill = "grey90", color = NA),
+        strip.text         = element_text(face = "bold", size = 10),
+        plot.title         = element_text(face = "bold", size = 14),
+        plot.subtitle      = element_text(size = 11, color = "gray40"),
+        ggside.panel.scale = 0.20
+      ) +
+      theme_ggside_void() 
+    
+    ggsave(file.path(scale_run_folder, "all_models_window_delta.png"),
+           p_cross,
+           width  = max(14, length(cross_year_breaks) * 0.7),
+           height = max(8,  length(unique(cross_delta$entity)) * 2.5),
+           dpi    = 300)
+    cat("  ✓ Saved: all_models_window_delta.png\n")
+    
+    write.csv(cross_delta,
+              file.path(scale_run_folder, "all_models_window_delta.csv"),
+              row.names = FALSE)
+    cat("  ✓ Saved: all_models_window_delta.csv\n")
+    
+    # =========================================================================
+    # PLOT 2: ggExtra — one figure per entity x metric, y-axis marginal density
+    # =========================================================================
+    cat("\n  📈 Generating ggExtra per-panel marginal plots...\n")
+    
+    marginal_folder <- file.path(scale_run_folder, "window_delta_marginal")
+    dir.create(marginal_folder, recursive = TRUE, showWarnings = FALSE)
+    
+    for (ent in sort(unique(cross_delta$entity))) {
+      for (met in sort(unique(cross_delta$metric_label))) {
+        
+        df_sub <- cross_delta |>
+          filter(entity == ent, metric_label == met)
+        
+        if (nrow(df_sub) == 0) next
+        
+        p_sub <- ggplot(df_sub,
+                        aes(x = window_start_year, y = delta_skill,
+                            color = model_key, group = model_key)) +
+          geom_hline(yintercept = 0, linetype = "dashed",
+                     color = "gray50", linewidth = 0.7) +
+          geom_line(linewidth = 0.9, alpha = 0.8) +
+          geom_point(size = 2.5, alpha = 0.9) +
+          scale_x_continuous(
+            name   = "Forecast Window Start Year",
+            breaks = sort(unique(df_sub$window_start_year))
+          ) +
+          scale_color_brewer(palette = "Dark2") +
+          theme_classic(base_size = 12) +
+          labs(
+            title    = glue("Skill Delta: {ent} | {met}"),
+            subtitle = "Positive = system wins | Negative = subregion wins",
+            y        = "\u0394 Skill Score (system \u2212 subregion)",
+            color    = "Model"
+          ) +
+          theme(
+            legend.position = "bottom",
+            axis.line       = element_line(linewidth = 1),
+            axis.text.x     = element_text(angle = 45, hjust = 1, size = 9),
+            plot.title      = element_text(face = "bold", size = 13),
+            plot.subtitle   = element_text(size = 10, color = "gray40")
+          )
+        
+        p_marginal <- ggMarginal(
+          p_sub,
+          margins     = "y",       # density on y-axis only
+          type        = "density",
+          groupColour = TRUE,      # one curve per model colour
+          groupFill   = TRUE,      # filled density per model
+          size        = 4          # main plot 4x wider than marginal strip
+        )
+        
+        fname <- glue("{ent}_{met}.png") |>
+          stringr::str_replace_all(" ", "_") |>
+          stringr::str_to_lower()
+        
+        ggsave(file.path(marginal_folder, fname),
+               p_marginal,
+               width  = 12,
+               height = 5,
+               dpi    = 300)
+        
+        cat(glue("    ✓ Saved: window_delta_marginal/{fname}\n"))
+      }
+    }
+    
+    cat("  ✓ All ggExtra marginal plots saved to: window_delta_marginal/\n")
+    
+  } else {
+    cross_delta <- NULL
+  }
 }
 
 # =============================================================================
