@@ -6,28 +6,29 @@
 
 
 # =============================================================================
-
-# HiPerGator-specific fix for module conflicts
+# Portable spatial-library setup
+# On HiPerGator, use the Blue library and load UDUNITS before spatial packages.
+# On a laptop, keep R's normal library paths and system libraries.
 if (dir.exists("/apps")) {
-  # Manually load UDUNITS without needing the module 'loaded' in the shell
-  if (file.exists("/apps/udunits/2.2.17/lib/libudunits2.so.0")) {
-    dyn.load("/apps/udunits/2.2.17/lib/libudunits2.so.0")
+  blue_library <- "/blue/ewhite/alexanderblochel/R/libs"
+  
+  if (!dir.exists(blue_library)) {
+    stop("HiPerGator R library not found: ", blue_library)
   }
   
-  # Manually load GDAL to bypass the Lmod conflict with R/4.6
-  # libgdal.so.30 is typically found in this path on HiPerGator
-  gdal_path <- "/apps/gcc/12.2.0/gdal/3.9.0/lib/libgdal.so"
-  if (file.exists(gdal_path)) {
-    dyn.load(gdal_path)
+  .libPaths(c(blue_library, .libPaths()))
+  
+  udunits_library <- "/apps/udunits/2.2.17/lib/libudunits2.so.0"
+  if (!file.exists(udunits_library)) {
+    stop("UDUNITS library not found: ", udunits_library)
   }
+  
+  dyn.load(udunits_library)
 }
 
-# Load the personal library path defined in your setup [2]
-.libPaths("~/R/libs")
-library('units')
-library('sf')
-library('stars')
-
+library(units)
+library(sf)
+library(stars)
 # =============================================================================
 
 
