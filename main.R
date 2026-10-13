@@ -6,6 +6,31 @@
 
 
 # =============================================================================
+<<<<<<< HEAD
+# Portable spatial-library setup
+# On HiPerGator, use the Blue library and load UDUNITS before spatial packages.
+# On a laptop, keep R's normal library paths and system libraries.
+if (dir.exists("/apps")) {
+  blue_library <- "/blue/ewhite/alexanderblochel/R/libs"
+  
+  if (!dir.exists(blue_library)) {
+    stop("HiPerGator R library not found: ", blue_library)
+  }
+  
+  .libPaths(c(blue_library, .libPaths()))
+  
+  udunits_library <- "/apps/udunits/2.2.17/lib/libudunits2.so.0"
+  if (!file.exists(udunits_library)) {
+    stop("UDUNITS library not found: ", udunits_library)
+  }
+  
+  dyn.load(udunits_library)
+}
+
+library(units)
+library(sf)
+library(stars)
+=======
 
 # # HiPerGator-specific fix for module conflicts
 # if (dir.exists("/apps")) {
@@ -28,6 +53,7 @@
 # library('sf')
 # library('stars')
 
+>>>>>>> weecology/main
 # =============================================================================
 
 

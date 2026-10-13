@@ -33,6 +33,7 @@ library(dplyr)
 library(ggplot2)
 library(patchwork)
 library(tidyr)
+library(ggExtra)
 library(glue)
 library(stringr)
 
@@ -47,8 +48,8 @@ source("data_functions.R")
 # =============================================================================
 # CONFIGURATION - EDIT THIS SECTION
 # =============================================================================
-SPECIES_TO_RUN   <- "top6"
-FORECAST_TOTALS  <- TRUE
+SPECIES_TO_RUN   <- 'top6'
+FORECAST_TOTALS  <- FALSE
 SCALES_TO_RUN    <- c("system", "subregion")
 FABLE_MODELS     <- c()
 MVGAM_MODELS     <- c("ar", "ar_exog", "ar_exog_plus")
@@ -777,6 +778,58 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
             file.path(scale_run_folder, "all_models_summary.csv"),
             row.names = FALSE)
   cat("  ✓ Saved: all_models_summary.csv\n")
+}
+
+
+# ===========================================================================
+# Marginal distribution plots
+# ===========================================================================
+
+
+
+for (ent in unique(cross_delta$entity)) {
+  for (met in unique(cross_delta$metric_label)) {
+    
+    df_sub <- cross_delta |>
+      filter(entity == ent, metric_label == met)
+    
+    p <- ggplot(df_sub,
+                aes(x = window_start_year, y = delta_skill,
+                    color = model_key, group = model_key)) +
+      geom_hline(yintercept = 0, linetype = "dashed", color = "gray50", linewidth = 0.7) +
+      geom_line(linewidth = 0.9, alpha = 0.8) +
+      geom_point(size = 2, alpha = 0.9) +
+      scale_x_continuous(name = "Forecast Window Start Year",
+                         breaks = sort(unique(df_sub$window_start_year))) +
+      theme_classic(base_size = 12) +
+      labs(
+        title    = glue("Skill Delta: {ent} | {met}"),
+        subtitle = "Positive = system wins | Negative = subregion wins",
+        y        = "\u0394 Skill Score (system \u2212 subregion)",
+        color    = "Model"
+      ) +
+      theme(
+        legend.position = "bottom",
+        axis.text.x     = element_text(angle = 45, hjust = 1, size = 9)
+      )
+    
+    p_marginal <- ggMarginal(
+      p,
+      margins   = "y",       # density on y-axis only
+      type      = "density",
+      groupColour = TRUE,    # one curve per model color
+      groupFill   = TRUE,
+      size      = 4          # main plot 4x wider than marginal
+    )
+    
+    fname <- glue("window_delta_{ent}_{met}.png") |>
+      stringr::str_replace_all(" ", "_") |>
+      stringr::str_to_lower()
+    
+    ggsave(file.path(scale_run_folder, fname),
+           p_marginal, width = 12, height = 5, dpi = 300)
+    cat(glue("  ✓ Saved: {fname}\n"))
+  }
 }
 
 # =============================================================================

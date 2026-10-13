@@ -3,7 +3,6 @@
 # Handles both system-wide (species only) and subregional (species x region)
 # Consistent evaluation for both mvgam and fable frameworks
 # =============================================================================
-
 library(dplyr)
 library(tidyr)
 library(verification)
@@ -11,7 +10,6 @@ library(distributional)
 library(future)
 library(furrr)
 library(progressr)
-
 
 guard_config_init <- function() {
   if (isTRUE(CONFIG$.skip_config_init)) {
@@ -23,7 +21,6 @@ guard_config_init <- function() {
 # =============================================================================
 # PARALLEL PROCESSING
 # =============================================================================
-
 setup_parallel <- function(enabled = TRUE, workers = NULL) {
   if (!enabled) {
     plan(sequential)
@@ -47,7 +44,6 @@ teardown_parallel <- function() {
 # =============================================================================
 # SLIDING WINDOW CROSS-VALIDATION
 # =============================================================================
-
 fit_sliding_window <- function(data,
                                make_forecast,
                                train_years,
@@ -171,7 +167,6 @@ fit_sliding_window <- function(data,
 # =============================================================================
 # MVGAM EVALUATION - CENTRALIZED EXTRACTION
 # =============================================================================
-
 #' Extract CRPS scores from mvgam forecast object
 extract_crps_mvgam <- function(forecast_obj, model_name) {
   crps_raw  <- score(forecast_obj, score = "crps")
@@ -210,7 +205,8 @@ calculate_rps_mvgam <- function(predictions, test_data, train_data, config,
         medium = quantile(count, config$ordinal_breaks[2], na.rm = TRUE),
         high   = quantile(count, config$ordinal_breaks[3], na.rm = TRUE),
         .groups = "drop"
-      )
+      ) |>
+      fix_zero_breaks()  # FIX: prevent NA categories when training data is all zeros
   }
   
   join_vars <- if (has_region && "region" %in% names(quantiles_by_group)) {
@@ -494,7 +490,7 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
   
   na_count <- sum(is.na(all_preds$year))
   if (na_count > 0) {
-    warning(glue::glue("  ⚠️  {na_count} predictions have NA years"))
+    warning(glue::glue("{na_count} predictions have NA years"))
   } else {
     cat("  ✓ All forecasts have valid years\n")
   }
@@ -580,7 +576,6 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
 # =============================================================================
 # FABLE EVALUATION - SKILL SCORES + RPS
 # =============================================================================
-
 #' Calculate RPS for fable predictions
 calculate_rps_fable <- function(forecasts, test_data, train_data, config,
                                 precomputed_breaks = NULL) {
@@ -590,7 +585,6 @@ calculate_rps_fable <- function(forecasts, test_data, train_data, config,
   
   group_vars <- if (has_region) c("species", "region") else "species"
   
-  # Ordinal breaks
   if (!is.null(precomputed_breaks)) {
     quantiles_by_group <- precomputed_breaks
   } else {
@@ -603,7 +597,8 @@ calculate_rps_fable <- function(forecasts, test_data, train_data, config,
         medium = quantile(count, config$ordinal_breaks[2], na.rm = TRUE),
         high   = quantile(count, config$ordinal_breaks[3], na.rm = TRUE),
         .groups = "drop"
-      )
+      ) |>
+      fix_zero_breaks()  # FIX: prevent NA categories when training data is all zeros
   }
   
   # Forecast probabilities
@@ -753,6 +748,18 @@ make_fable_evaluation <- function(raw_metrics, forecasts, test_data,
 # =============================================================================
 # UTILITY FUNCTIONS
 # =============================================================================
+#' Replace zero or NA ordinal breaks with a small epsilon so cut() works
+#' when training data is all zeros (e.g., sparse early CV windows).
+#' The epsilon ladder keeps thresholds strictly ordered.
+fix_zero_breaks <- function(quantiles_df) {
+  eps <- 0.5  # half a count — below any real positive observation
+  quantiles_df |>
+    mutate(
+      low    = if_else(is.na(low)    | low    == 0, eps,       low),
+      medium = if_else(is.na(medium) | medium == 0, eps * 2,   medium),
+      high   = if_else(is.na(high)   | high   == 0, eps * 3,   high)
+    )
+}
 
 #' Filter data to recent years for ordinal break calculation
 filter_ordinal_years <- function(df, ordinal_years) {
@@ -785,12 +792,12 @@ print_cv_summary <- function(cv_results) {
     } else if (".model" %in% names(metrics)) {
       model_col <- ".model"
     } else {
-      cat("⚠️  No model column found\n")
+      cat("No model column found\n")
       return(invisible(NULL))
     }
     
     if (!"crps" %in% names(metrics)) {
-      cat("⚠️  No CRPS column found\n")
+      cat("No CRPS column found\n")
       return(invisible(NULL))
     }
     
