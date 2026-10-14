@@ -41,12 +41,16 @@ if (length(stale_locks) > 0) {
 # available compilers and compatible system libraries.
 cran_repo <- "https://cloud.r-project.org"
 options(repos = c(CRAN = cran_repo))
+
+# fs requires libuv; use the bundled static version on HiPerGator
+Sys.setenv(USE_BUNDLED_LIBUV = 1)
+
 cran_packages <- c(
   # Core data
   "digest", "dplyr", "tidyr", "readr", "tsibble", "zoo",
   
   # Visualization
-  "ggplot2", "patchwork", "stringr", "glue",
+  "ggplot2", "patchwork", "stringr", "glue", "ggExtra", "ggside",
   
   # Modeling
   "mvgam", "distributional", "verification",
@@ -55,7 +59,7 @@ cran_packages <- c(
   "future", "furrr", "progressr",
   
   # Configuration and utilities
-  "config", "conflicted", "remotes",
+  "config", "conflicted", "remotes", "fs", "devtools",
   
   # Spatial
   "sf", "stars", "units", "terra"
