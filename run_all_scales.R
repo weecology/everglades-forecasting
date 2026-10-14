@@ -4,65 +4,63 @@
 # Computes per-window skill delta: skill_system_t - skill_subregion_t
 # Works for both species-level and total count forecasting modes
 # =============================================================================
-
 # # HiPerGator-specific fix for module conflicts
 # if (dir.exists("/apps")) {
 #   # Manually load UDUNITS without needing the module 'loaded' in the shell
 #   if (file.exists("/apps/udunits/2.2.17/lib/libudunits2.so.0")) {
 #     dyn.load("/apps/udunits/2.2.17/lib/libudunits2.so.0")
 #   }
-#   
+#
 #   # Manually load GDAL to bypass the Lmod conflict with R/4.6
-#   # libgdal.so.30 is typically found in this path on HiPerGator
 #   gdal_path <- "/apps/gcc/12.2.0/gdal/3.9.0/lib/libgdal.so"
 #   if (file.exists(gdal_path)) {
 #     dyn.load(gdal_path)
 #   }
 # }
-# 
-# # Load the personal library path defined in your setup [2]
+#
 # .libPaths("~/R/libs")
 # library('units')
 # library('sf')
 # library('stars')
-
 # =============================================================================
-
-# config loaded via config::get() directly — do not use library(config)
 library(dplyr)
 library(ggplot2)
 library(patchwork)
 library(tidyr)
-library(ggExtra)
 library(glue)
 library(stringr)
-
-library(conflicted) #conflict of filter and select 
+library(conflicted)
 conflicted::conflicts_prefer(dplyr::filter, .quiet = TRUE)
 conflicted::conflicts_prefer(dplyr::select, .quiet = TRUE)
 
-
-# ADD THIS LINE HERE:
 source("data_functions.R")
 
 # =============================================================================
 # CONFIGURATION - EDIT THIS SECTION
 # =============================================================================
-SPECIES_TO_RUN   <- 'top6'
-FORECAST_TOTALS  <- FALSE
-SCALES_TO_RUN    <- c("system", "subregion")
-FABLE_MODELS     <- c()
-MVGAM_MODELS     <- c("ar", "ar_exog", "ar_exog_plus")
+SPECIES_TO_RUN   <- "top6"
+FORECAST_TOTALS  <- TRUE
+SCALES_TO_RUN    <- c("system", "subregion") #c("system", "subregion", "colony") 
+FABLE_MODELS     <- c('arima', 'arima_exog') #c("arima", "tslm", "arima_exog", "gam")
+MVGAM_MODELS     <- c()
 PARALLEL         <- TRUE
 PARALLEL_WORKERS <- 3
 
 # =============================================================================
+# INSTALL / LOAD MARGINAL PLOT PACKAGES
+# =============================================================================
+if (!requireNamespace("ggside", quietly = TRUE))
+  install.packages("ggside", lib = "~/R/libs", repos = "https://cloud.r-project.org")
+if (!requireNamespace("ggExtra", quietly = TRUE))
+  install.packages("ggExtra", lib = "~/R/libs", repos = "https://cloud.r-project.org")
+
+library(ggside)
+library(ggExtra)
+
+# =============================================================================
 # SERIAL PRECOMPUTE OF ALL SHARED ARTIFACTS
-# Must complete before any parallel workers start.
-# Mirrors the precompute block in main.R [1].
 # =============================================================================
 cat("Precomputing shared data artifacts...\n")
-
 needs_download <- !dir.exists("SiteandMethods") || {
   stamp <- file.info("SiteandMethods")$mtime
   is.na(stamp) || difftime(Sys.time(), stamp, units = "days") > 7
@@ -74,7 +72,6 @@ if (needs_download) {
 } else {
   cat("  ✓ Wader observation data current — skipping download\n")
 }
-
 cat("  Pre-caching water covariate data...\n")
 tryCatch({
   get_data_water()
@@ -83,7 +80,6 @@ tryCatch({
 
 cat("  Pre-caching wading bird data...\n")
 tryCatch({
-  # Load base config just enough to call get_wading_bird_data() for each scale
   tmp_cfg <- config::get(config = "run_all_scales_all")
   tmp_cfg$spatial$include_species <- SPECIES_TO_RUN
   tmp_cfg$spatial$forecast_totals <- FORECAST_TOTALS
@@ -104,7 +100,6 @@ source("parallel_utils.R")
 
 # =============================================================================
 # HELPER: extract start year from window label or test_start
-# Handles formats: "2003-2007", "2003_2007", "W01", integer years, etc.
 # =============================================================================
 extract_window_start_year <- function(window_vec, test_start_vec = NULL) {
   if (!is.null(test_start_vec)) {
@@ -211,7 +206,6 @@ run_single_model <- function(model_key) {
     CONFIG$spatial$run_by_region <- current_scale != "system"
     CONFIG$.skip_config_init     <- TRUE
     CONFIG$parallel$enabled      <- FALSE
-    # FIX: embed model_key so main.R [1] builds a unique run_folder per worker
     CONFIG$model_key             <- model_key
     
     if (framework == "mvgam") {
@@ -241,32 +235,20 @@ run_single_model <- function(model_key) {
       }
     }
     
-    # -------------------------------------------------------------------------
-    # Run main.R — capture run_folder from .GlobalEnv after sourcing
-    # FIX: check .GlobalEnv explicitly; source() sets run_folder there
-    # -------------------------------------------------------------------------
     run_succeeded <- FALSE
     run_folder    <- NULL
     
     tryCatch({
       source("main.R")
-      
-      # Read run_folder back from .GlobalEnv where main.R assigned it
       run_folder <- base::get("run_folder", envir = .GlobalEnv, inherits = FALSE)
-      
-      if (is.null(run_folder)) {
+      if (is.null(run_folder))
         stop("main.R completed but run_folder was not set in .GlobalEnv")
-      }
-      if (!dir.exists(run_folder)) {
+      if (!dir.exists(run_folder))
         stop(glue("run_folder '{run_folder}' does not exist"))
-      }
       rds_path <- file.path(run_folder, "forecast_results.rds")
-      if (!file.exists(rds_path)) {
+      if (!file.exists(rds_path))
         stop(glue("forecast_results.rds missing from: {rds_path}"))
-      }
-      
       run_succeeded <- TRUE
-      
     }, error = function(e) {
       cat(glue("\n  ✗ {model_key} at {current_scale} FAILED\n"))
       cat(glue("    Reason: {e$message}\n"))
@@ -277,9 +259,6 @@ run_single_model <- function(model_key) {
       cat(glue("    run_folder at error: {if (!is.null(rf)) rf else 'not set'}\n"))
     })
     
-    # -------------------------------------------------------------------------
-    # Copy results to model/scale subfolder, then delete the temp run_folder
-    # -------------------------------------------------------------------------
     if (run_succeeded && !is.null(run_folder)) {
       
       dest_folder   <- file.path(model_folder, current_scale)
@@ -290,9 +269,7 @@ run_single_model <- function(model_key) {
         model_scale_results[[current_scale]] <- NULL
       } else {
         for (src_file in files_to_copy) {
-          # Use fs::path_rel to safely extract the relative path
           rel_path  <- fs::path_rel(src_file, start = run_folder)
-          
           dest_file <- file.path(dest_folder, rel_path)
           dir.create(dirname(dest_file), recursive = TRUE, showWarnings = FALSE)
           file.copy(src_file, dest_file, overwrite = TRUE)
@@ -317,7 +294,6 @@ run_single_model <- function(model_key) {
         "",
         "Check that main.R completes without error and saves forecast_results.rds."
       ), fail_log)
-      
       cat(glue("  ✗ Failure logged to: {fail_log}\n"))
       model_scale_results[[current_scale]] <- NULL
     }
@@ -347,7 +323,6 @@ if (PARALLEL) {
   all_model_results <- lapply(names(models_to_test), run_single_model)
   names(all_model_results) <- names(models_to_test)
 }
-
 cat("\n✅ ALL MODEL RUNS COMPLETE!\n\n")
 
 # =============================================================================
@@ -404,12 +379,7 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
   warning("No window-level metrics found. Skipping delta computation.")
 } else {
   
-  skill_metrics <- intersect(
-    c("crps_skill", "rps_skill", "rmse_skill"),
-    names(all_window_metrics)
-  )
-  
-  # FIX: replaced pick(everything()) inside if() with a plain names() check
+  skill_metrics  <- intersect(c("crps_skill", "rps_skill", "rmse_skill"), names(all_window_metrics))
   has_test_start <- "test_start" %in% names(all_window_metrics)
   
   window_long <- all_window_metrics |>
@@ -533,10 +503,6 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
       next
     }
     
-    cat(glue("  Delta rows: {nrow(delta_df)} | ",
-             "windows: {length(unique(delta_df$window_start_year))} | ",
-             "metrics: {paste(unique(delta_df$metric_label), collapse=', ')}\n"))
-    
     year_breaks_delta <- sort(unique(delta_df$window_start_year))
     
     p_delta <- ggplot(delta_df,
@@ -579,15 +545,13 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
   }
   
   # ===========================================================================
-  # CROSS-MODEL DELTA PLOT
+  # CROSS-MODEL DELTA PLOTS
   # ===========================================================================
-  # FIX: initialise cross_delta to NULL so the downstream exists() check is
-  # always well-defined even when the if-block below is skipped
   cross_delta <- NULL
   
   if (all(c("system", "subregion") %in% SCALES_TO_RUN)) {
     
-    cat("\n📊 Generating cross-model delta plot...\n")
+    cat("\n📊 Generating cross-model delta plots...\n")
     
     cross_id_cols <- intersect(
       c("model_key",
@@ -619,34 +583,53 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
       
       cross_year_breaks <- sort(unique(cross_delta$window_start_year))
       
+      # -----------------------------------------------------------------------
+      # PLOT 1: ggside — faceted figure with y-axis marginal density
+      # -----------------------------------------------------------------------
       p_cross <- ggplot(cross_delta,
                         aes(x = window_start_year, y = delta_skill,
                             color = model_key, group = model_key)) +
-        geom_hline(yintercept = 0, linetype = "dashed", color = "gray50", linewidth = 0.7) +
+        geom_hline(yintercept = 0, linetype = "dashed",
+                   color = "gray50", linewidth = 0.7) +
         geom_line(linewidth = 0.9, alpha = 0.8) +
         geom_point(size = 2, alpha = 0.9) +
+        geom_ysidedensity(
+          aes(x = after_stat(density), fill = model_key),
+          alpha     = 0.20,
+          linewidth = 0.7,
+          position  = "identity"
+        ) +
         facet_grid(entity ~ metric_label, scales = "free_y") +
-        scale_x_continuous(name = "Forecast Window Start Year", breaks = cross_year_breaks) +
+        ggside(scales = "free", y.pos = "right") +
+        scale_x_continuous(name   = "Forecast Window Start Year",
+                           breaks = cross_year_breaks) +
+        scale_color_brewer(palette = "Dark2") +
+        scale_fill_brewer(palette  = "Dark2") +
         theme_classic(base_size = 12) +
         labs(
           title    = "All Models: Skill Delta per Window (System \u2212 Subregion)",
-          subtitle = "Positive = system outperforms subregion | Negative = subregion wins",
+          subtitle = paste0("Positive = system outperforms subregion | ",
+                            "Negative = subregion wins\n",
+                            "Right strip = marginal distribution of \u0394 skill"),
           y        = "\u0394 Skill Score (system \u2212 subregion)",
-          color    = "Model"
+          color    = "Model",
+          fill     = "Model"
         ) +
         theme(
-          legend.position  = "bottom",
-          axis.line        = element_line(linewidth = 1),
-          axis.text.x      = element_text(angle = 45, hjust = 1, size = 9),
-          strip.background = element_rect(fill = "grey90", color = NA),
-          strip.text       = element_text(face = "bold", size = 10),
-          plot.title       = element_text(face = "bold", size = 14),
-          plot.subtitle    = element_text(size = 11, color = "gray40")
-        )
+          legend.position    = "bottom",
+          axis.line          = element_line(linewidth = 1),
+          axis.text.x        = element_text(angle = 45, hjust = 1, size = 9),
+          strip.background   = element_rect(fill = "grey90", color = NA),
+          strip.text         = element_text(face = "bold", size = 10),
+          plot.title         = element_text(face = "bold", size = 14),
+          plot.subtitle      = element_text(size = 11, color = "gray40"),
+          ggside.panel.scale = 0.20
+        ) +
+        theme_ggside_void()  # must be last — hides marginal axis labels/ticks
       
       ggsave(file.path(scale_run_folder, "all_models_window_delta.png"),
              p_cross,
-             width  = max(12, length(cross_year_breaks) * 0.7),
+             width  = max(14, length(cross_year_breaks) * 0.7),
              height = max(8,  length(unique(cross_delta$entity)) * 2.5),
              dpi    = 300)
       cat("  ✓ Saved: all_models_window_delta.png\n")
@@ -655,6 +638,74 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
                 file.path(scale_run_folder, "all_models_window_delta.csv"),
                 row.names = FALSE)
       cat("  ✓ Saved: all_models_window_delta.csv\n")
+      
+      # -----------------------------------------------------------------------
+      # PLOT 2: ggExtra — one PNG per entity x metric with y-axis marginal
+      # -----------------------------------------------------------------------
+      cat("\n  📈 Generating ggExtra per-panel marginal plots...\n")
+      
+      marginal_folder <- file.path(scale_run_folder, "window_delta_marginal")
+      dir.create(marginal_folder, recursive = TRUE, showWarnings = FALSE)
+      
+      for (ent in sort(unique(cross_delta$entity))) {
+        for (met in sort(unique(cross_delta$metric_label))) {
+          
+          df_sub <- cross_delta |>
+            filter(entity == ent, metric_label == met)
+          
+          if (nrow(df_sub) == 0) next
+          
+          p_sub <- ggplot(df_sub,
+                          aes(x = window_start_year, y = delta_skill,
+                              color = model_key, group = model_key)) +
+            geom_hline(yintercept = 0, linetype = "dashed",
+                       color = "gray50", linewidth = 0.7) +
+            geom_line(linewidth = 0.9, alpha = 0.8) +
+            geom_point(size = 2.5, alpha = 0.9) +
+            scale_x_continuous(
+              name   = "Forecast Window Start Year",
+              breaks = sort(unique(df_sub$window_start_year))
+            ) +
+            scale_color_brewer(palette = "Dark2") +
+            theme_classic(base_size = 12) +
+            labs(
+              title    = glue("Skill Delta: {ent} | {met}"),
+              subtitle = "Positive = system wins | Negative = subregion wins",
+              y        = "\u0394 Skill Score (system \u2212 subregion)",
+              color    = "Model"
+            ) +
+            theme(
+              legend.position = "bottom",
+              axis.line       = element_line(linewidth = 1),
+              axis.text.x     = element_text(angle = 45, hjust = 1, size = 9),
+              plot.title      = element_text(face = "bold", size = 13),
+              plot.subtitle   = element_text(size = 10, color = "gray40")
+            )
+          
+          p_marginal <- ggMarginal(
+            p_sub,
+            margins     = "y",
+            type        = "density",
+            groupColour = TRUE,
+            groupFill   = TRUE,
+            size        = 4
+          )
+          
+          fname <- glue("{ent}_{met}.png") |>
+            stringr::str_replace_all(" ", "_") |>
+            stringr::str_to_lower()
+          
+          ggsave(file.path(marginal_folder, fname),
+                 p_marginal,
+                 width  = 12,
+                 height = 5,
+                 dpi    = 300)
+          
+          cat(glue("    ✓ Saved: window_delta_marginal/{fname}\n"))
+        }
+      }
+      
+      cat("  ✓ All ggExtra marginal plots saved to: window_delta_marginal/\n")
       
     } else {
       cross_delta <- NULL
@@ -780,58 +831,6 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
   cat("  ✓ Saved: all_models_summary.csv\n")
 }
 
-
-# ===========================================================================
-# Marginal distribution plots
-# ===========================================================================
-
-
-
-for (ent in unique(cross_delta$entity)) {
-  for (met in unique(cross_delta$metric_label)) {
-    
-    df_sub <- cross_delta |>
-      filter(entity == ent, metric_label == met)
-    
-    p <- ggplot(df_sub,
-                aes(x = window_start_year, y = delta_skill,
-                    color = model_key, group = model_key)) +
-      geom_hline(yintercept = 0, linetype = "dashed", color = "gray50", linewidth = 0.7) +
-      geom_line(linewidth = 0.9, alpha = 0.8) +
-      geom_point(size = 2, alpha = 0.9) +
-      scale_x_continuous(name = "Forecast Window Start Year",
-                         breaks = sort(unique(df_sub$window_start_year))) +
-      theme_classic(base_size = 12) +
-      labs(
-        title    = glue("Skill Delta: {ent} | {met}"),
-        subtitle = "Positive = system wins | Negative = subregion wins",
-        y        = "\u0394 Skill Score (system \u2212 subregion)",
-        color    = "Model"
-      ) +
-      theme(
-        legend.position = "bottom",
-        axis.text.x     = element_text(angle = 45, hjust = 1, size = 9)
-      )
-    
-    p_marginal <- ggMarginal(
-      p,
-      margins   = "y",       # density on y-axis only
-      type      = "density",
-      groupColour = TRUE,    # one curve per model color
-      groupFill   = TRUE,
-      size      = 4          # main plot 4x wider than marginal
-    )
-    
-    fname <- glue("window_delta_{ent}_{met}.png") |>
-      stringr::str_replace_all(" ", "_") |>
-      stringr::str_to_lower()
-    
-    ggsave(file.path(scale_run_folder, fname),
-           p_marginal, width = 12, height = 5, dpi = 300)
-    cat(glue("  ✓ Saved: {fname}\n"))
-  }
-}
-
 # =============================================================================
 # FINAL SUMMARY
 # =============================================================================
@@ -841,11 +840,12 @@ cat("✅ MODEL-BY-MODEL SPATIAL SCALE COMPARISON COMPLETE\n")
 cat(paste(rep("=", 80), collapse = ""), "\n\n")
 cat("📂 All results saved to:", scale_run_folder, "\n\n")
 cat("📁 Folder Structure:\n")
-cat("  • base_config.rds                - Base configuration\n")
-cat("  • window_skill_all_scales.csv    - Per-window skill scores (all models/scales)\n")
-cat("  • all_models_window_delta.png    - Cross-model delta plot (x = start year)\n")
-cat("  • all_models_window_delta.csv    - Cross-model delta table\n")
-cat("  • all_models_summary.csv         - Aggregated summary across windows\n\n")
+cat("  • base_config.rds                   - Base configuration\n")
+cat("  • window_skill_all_scales.csv       - Per-window skill scores (all models/scales)\n")
+cat("  • all_models_window_delta.png       - Cross-model delta plot with ggside marginal\n")
+cat("  • all_models_window_delta.csv       - Cross-model delta table\n")
+cat("  • all_models_summary.csv            - Aggregated summary across windows\n")
+cat("  • window_delta_marginal/            - ggExtra per-panel marginal plots\n\n")
 for (model_key in names(all_model_results)) {
   cat(glue("  • {model_key}/\n"))
   cat(glue("    \u251c\u2500\u2500 window_skill_by_scale.png  - Skill per window by scale\n"))
