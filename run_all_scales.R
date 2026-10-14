@@ -27,6 +27,8 @@ library(dplyr)
 library(ggplot2)
 library(patchwork)
 library(tidyr)
+library(ggExtra)
+library(ggside)
 library(glue)
 library(stringr)
 library(conflicted)
@@ -39,23 +41,17 @@ source("data_functions.R")
 # CONFIGURATION - EDIT THIS SECTION
 # =============================================================================
 SPECIES_TO_RUN   <- "top6"
-FORECAST_TOTALS  <- TRUE
+FORECAST_TOTALS  <- FALSE
 SCALES_TO_RUN    <- c("system", "subregion") #c("system", "subregion", "colony") 
-FABLE_MODELS     <- c('arima', 'arima_exog') #c("arima", "tslm", "arima_exog", "gam")
-MVGAM_MODELS     <- c()
+FABLE_MODELS     <- c("arima", "tslm", "arima_exog", "gam")
+# c("arima", "tslm", "arima_exog", "gam")
+MVGAM_MODELS     <- c() 
+# c('ar', 'ar_exog', 'ar_exog_plus', 'trait', 'speies_specific', 'trait2')
 PARALLEL         <- TRUE
 PARALLEL_WORKERS <- 3
 
-# =============================================================================
-# INSTALL / LOAD MARGINAL PLOT PACKAGES
-# =============================================================================
-if (!requireNamespace("ggside", quietly = TRUE))
-  install.packages("ggside", lib = "~/R/libs", repos = "https://cloud.r-project.org")
-if (!requireNamespace("ggExtra", quietly = TRUE))
-  install.packages("ggExtra", lib = "~/R/libs", repos = "https://cloud.r-project.org")
 
-library(ggside)
-library(ggExtra)
+
 
 # =============================================================================
 # SERIAL PRECOMPUTE OF ALL SHARED ARTIFACTS
