@@ -5,7 +5,7 @@
 # Before running:
 #   1. Load the R and spatial-library modules used by the project.
 #   2. Run with that same R version/environment when running the pipeline.
-#
+# 
 # Run:
 #   Rscript install_packages.R
 # =============================================================================
@@ -44,15 +44,11 @@ cran_packages <- c(
   
   # Visualization
   "ggplot2", "patchwork", "stringr", "glue",
-<<<<<<< HEAD
+
   
   # Modeling
   "mvgam", "distributional", "verification",
   
-=======
-  # Modelling
-  # "mvgam", "distributional", "verification", 
->>>>>>> weecology/main
   # Parallel
   "future", "furrr", "progressr",
   
@@ -101,7 +97,7 @@ remotes::install_github(
   upgrade = "never"
 )
 
-<<<<<<< HEAD
+
 # Confirm installation and test that the key packages can be loaded.
 requested_packages <- c(cran_packages, "cmdstanr", "edenR", "wader")
 installed <- rownames(installed.packages(lib.loc = lib_path))
@@ -122,57 +118,4 @@ for (pkg in requested_packages) {
 
 cat("\nAll requested packages are installed and load in:\n", lib_path, "\n", sep = "")
 cat("Note: cmdstanr is installed, but CmdStan itself must be installed separately.\n")
-=======
-# Install spatial packages with explicit lib and repo
-# Personal library setup
-lib_path <- "~/R/libs"
-dir.create(lib_path, recursive = TRUE, showWarnings = FALSE)
-.libPaths(lib_path)
 
-
-
-# Use RSPM for binaries on HiPerGator (RHEL9)
-hpg_repo <- "https://packagemanager.posit.co/cran/__linux__/rhel9/latest"
-is_hpg <- dir.exists("/apps")
-
-# Install units first with explicit udunits2 paths
-install.packages('units',
-                 lib = lib_path,
-                 repos = if(is_hpg) hpg_repo else "https://cloud.r-project.org",
-                 configure.args = '--with-udunits2-lib=/apps/udunits/2.2.17/lib --with-udunits2-include=/apps/udunits/2.2.17/include',
-                 configure.vars = 'CFLAGS=-fexceptions CXXFLAGS=-fexceptions')
-
-# Then sf and stars
-install.packages(c('sf', 'stars'),
-                 lib = lib_path,
-                 repos = if(is_hpg) hpg_repo else "https://cloud.r-project.org")
-
-
-# Install cmdstanr from its custom repository
-install.packages("cmdstanr", lib = lib_path, repos = c("https://stan-dev.r-universe.dev", "https://cloud.r-project.org"))
-
-# =============================================================================
-# GITHUB PACKAGES
-# =============================================================================
-install.packages("remotes", lib = lib_path, repos = "https://cloud.r-project.org")
-remotes::install_github("weecology/edenR", lib = lib_path, upgrade = "never")
-remotes::install_github("weecology/wader",  lib = lib_path, upgrade = "never")
-
-# =============================================================================
-# CMDSTAN
-# =============================================================================
-library(cmdstanr)
-cmdstanr::install_cmdstan(cores = 8)
-
-# =============================================================================
-# VERIFY
-# =============================================================================
-pkgs <- c(cran_packages, "sf", "stars", "units", "cmdstanr", "edenR", "wader")
-missing <- pkgs[!pkgs %in% installed.packages(lib.loc = lib_path)[, "Package"]]
-if (length(missing) == 0) {
-  cat("✓ All packages installed successfully\n")
-} else {
-  cat("✗ Missing packages:\n")
-  cat(paste(" •", missing, collapse = "\n"), "\n")
-}
->>>>>>> weecology/main

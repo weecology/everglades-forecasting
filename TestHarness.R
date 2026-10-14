@@ -4,20 +4,28 @@
 
 # =============================================================================
 
-# HiPerGator-specific fix for module conflicts
+# # HiPerGator-specific fix for module conflicts
 # if (dir.exists("/apps")) {
 #   # Manually load UDUNITS without needing the module 'loaded' in the shell
 #   if (file.exists("/apps/udunits/2.2.17/lib/libudunits2.so.0")) {
 #     dyn.load("/apps/udunits/2.2.17/lib/libudunits2.so.0")
 #   }
+#   
+#   # Manually load GDAL to bypass the Lmod conflict with R/4.6
+#   # libgdal.so.30 is typically found in this path on HiPerGator
+#   gdal_path <- "/apps/gcc/12.2.0/gdal/3.9.0/lib/libgdal.so"
+#   if (file.exists(gdal_path)) {
+#     dyn.load(gdal_path)
+#   }
 # }
+# 
+# # Load the personal library path defined in your setup [2]
+# .libPaths("~/R/libs")
+# library('units')
+# library('sf')
+# library('stars')
 
-# Load the personal library path defined in your setup [2]
-library('units')
-library('sf')
-library('stars')
-
-# # =============================================================================
+# =============================================================================
 
 
 
@@ -140,12 +148,6 @@ test_single_model <- function(model_name,
       data = data,
       # --- WRAPPER FOR PARALLEL WORKERS ---
       make_forecast = function(train, test, ...) {
-        
-        # Force parallel workers to load UDUNITS (hypergator)
-        if (file.exists("/apps/udunits/2.2.17/lib/libudunits2.so.0")) {
-          dyn.load("/apps/udunits/2.2.17/lib/libudunits2.so.0")
-        }
-        
         source("evaluation.R", local = FALSE)
         source(file.path("models", "mvgam_baseline.R"), local = FALSE)
         source(file.path("models", paste0("mvgam_", model_name, ".R")), local = FALSE)
