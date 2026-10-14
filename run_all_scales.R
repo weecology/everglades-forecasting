@@ -47,7 +47,7 @@ FABLE_MODELS     <- c("arima", "tslm", "arima_exog", "gam")
 # c("arima", "tslm", "arima_exog", "gam")
 MVGAM_MODELS     <- c() 
 # c('ar', 'ar_exog', 'ar_exog_plus', 'trait', 'speies_specific', 'trait2')
-PARALLEL         <- TRUE
+PARALLEL         <- FALSE
 PARALLEL_WORKERS <- 3
 
 
