@@ -5,7 +5,7 @@
 # Before running:
 #   1. Load the R and spatial-library modules used by the project.
 #   2. Run with that same R version/environment when running the pipeline.
-#
+# 
 # Run:
 #   Rscript install_packages.R
 # =============================================================================
