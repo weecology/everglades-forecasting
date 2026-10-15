@@ -23,7 +23,7 @@ if (dir.exists("/apps")) {
 }
 
 # Load the personal library path defined in your setup [2]
-.libPaths("~/R/libs")
+# .libPaths("~/R/libs")
 library('units')
 library('sf')
 library('stars')
