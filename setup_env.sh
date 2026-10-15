@@ -9,10 +9,8 @@ ml R/4.6 || {
   echo "ERROR: Could not load R/4.6." >&2
   return 1
 }
-ml gdal/3.7.0 || {
-  echo "ERROR: Could not load gdal/3.7.0." >&2
-  return 1
-}
+# GDAL is provided inside the R/4.6 container; do not load the gdal module
+# (Lmod treats gdal and R as mutually exclusive).
 export R_LIBS_USER=/blue/ewhite/alexanderblochel/R/libs
 mkdir -p "$R_LIBS_USER"
 echo "R package library: $R_LIBS_USER"
