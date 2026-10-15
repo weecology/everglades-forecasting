@@ -45,8 +45,8 @@ FORECAST_TOTALS  <- FALSE
 SCALES_TO_RUN    <- c("system", "subregion") #c("system", "subregion", "colony") 
 FABLE_MODELS     <- c("arima", "tslm", "arima_exog", "gam")
 # c("arima", "tslm", "arima_exog", "gam")
-MVGAM_MODELS     <- c() 
-# c('ar', 'ar_exog', 'ar_exog_plus', 'trait', 'speies_specific', 'trait2')
+MVGAM_MODELS     <- c('ar', 'ar_exog', 'ar_exog_plus') 
+# c('ar', 'ar_exog', 'ar_exog_plus', 'trait', 'species_specific', 'trait2')
 PARALLEL         <- FALSE
 PARALLEL_WORKERS <- 3
 
