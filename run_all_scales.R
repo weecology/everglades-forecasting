@@ -852,9 +852,9 @@ for (model_key in names(all_model_results)) {
 
 
 # =============================================================================
-# ZIP results forleder if on HiPerGator
+# ZIP results folder if on HiPerGator blue
 # =============================================================================
-on_hipergator <- dir.exists("/blue/ewhite") || dir.exists("/orange/ewhite")
+on_hipergator <- dir.exists("/blue/ewhite") 
 
 if (on_hipergator) {
   zip_path <- paste0(scale_run_folder, ".zip")
