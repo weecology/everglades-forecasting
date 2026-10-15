@@ -849,3 +849,18 @@ for (model_key in names(all_model_results)) {
   cat(glue("    \u251c\u2500\u2500 window_delta_skill.csv     - Delta table\n"))
   for (scale in SCALES_TO_RUN) cat(glue("    \u251c\u2500\u2500 {scale}/\n"))
 }
+
+
+# =============================================================================
+# ZIP results forleder if on HiPerGator
+# =============================================================================
+on_hipergator <- dir.exists("/blue/ewhite") || dir.exists("/orange/ewhite")
+
+if (on_hipergator) {
+  zip_path <- paste0(scale_run_folder, ".zip")
+  cat("\n📦 Zipping results folder...\n")
+  zip(zipfile = zip_path, files = scale_run_folder)
+  cat(glue("  ✓ Zipped: {zip_path}\n"))
+  unlink(scale_run_folder, recursive = TRUE)
+  cat(glue("  ✓ Removed original folder: {scale_run_folder}\n"))
+}
