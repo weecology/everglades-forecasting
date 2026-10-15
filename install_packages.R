@@ -53,7 +53,7 @@ cran_packages <- c(
   "ggplot2", "patchwork", "stringr", "glue", "ggExtra", "ggside",
   
   # Modeling
-  "mvgam", "distributional", "verification",
+  "mvgam", "distributional", "verification", "fable",
   
   # Parallel
   "future", "furrr", "progressr",
