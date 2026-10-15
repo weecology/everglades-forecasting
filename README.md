@@ -218,53 +218,32 @@ default:
 
 ## Running on HiPerGator
 
-Due to complex system dependencies for spatial packages (`sf`, `stars`, `units`, `terra`), running this pipeline on UF's HiPerGator requires specific environment configurations before installing packages or running scripts.
+Install packages on a **login node** and run models on a **compute node**. Both use the shared R package library under `/blue`.
 
-### 1. Environment Setup (`setup_env.sh`)
-Create a `setup_env.sh` file in your project directory to load the required C/C++ modules and link the system libraries (GDAL, GEOS, PROJ, UDUNITS2). 
+### 1. Set up R and install packages on the login node
 
-```bash
-#!/bin/bash
-# setup_env.sh
-# Load required modules
-ml geos/3.6.2 proj/4.8.0 udunits/2.2.17
-ml R
+From the project directory:
 
-# Set runtime library paths for spatial dependencies
-export LD_LIBRARY_PATH=/apps/udunits/2.2.17/lib:/apps/gdal/3.7.0/lib:/apps/lib/proj/4.8.0/lib:/apps/geos/3.6.2/lib:$LD_LIBRARY_PATH
+    source setup_env.sh
+    Rscript install_packages.R
 
-# Set PROJ database path
-export PROJ_DATA=/apps/gdal/3.7.0/share/proj
-```
-*Note: You must run `source setup_env.sh` in your terminal before launching R or running any scripts.*
+`setup_env.sh` loads R/4.6 and sets the package library to `/blue/ewhite/alexanderblochel/R/libs`. Do not load a separate GDAL module; on this system, it replaces the R module.
 
-### 2. Configure `.Renviron` and `.Rprofile`
-Ensure your R environment knows where to save personal packages and where to route large downloaded datasets (to prevent filling up your `/home` directory quota). From your terminal, run:
 
-```bash
-# Set your personal library path
-echo '.libPaths(c("~/R/libs", .libPaths()))' > ~/.Rprofile
+### 2. Request a compute session
 
-# Prevent `wader` and `edenR` from saving large datasets to your home directory
-echo 'WADER_DATA_PATH="/blue/ewhite/alexanderblochel/everglades-forecasting"' >> ~/.Renviron
-```
+    srundev --time 2:00:00 --mem 32gb
+    
 
-### 3. Package Installation
-When running the installation script, ensure that the spatial packages (`sf`, `stars`, `units`) are compiled directly from CRAN source (`https://cloud.r-project.org`). Do not use pre-compiled RSPM RHEL9 binaries for these packages (`https://packagemanager.posit.co/cran/__linux__/rhel9/latest`), as they will cause `libgdal.so` shared object conflicts with HiPerGator's loaded GDAL modules [1].
+### 3. Run the pipeline on the compute node
 
-### 4. Executing the Pipeline
-Every time you log into a new HiPerGator session to run your models, submit a SLURM job, or use the test harness, you must source the environment script first:
+From the project directory:
 
-**Interactive Session:**
-```bash
-source setup_env.sh
-R
-> source("TestHarness.R")
-```
+    source setup_env.sh
+    Rscript run_all_scales.R
 
-**Batch / SLURM Script:**
-```bash
-source setup_env.sh
-Rscript main.R
-```
- 
+You do not need to reinstall packages on the compute node. If a package is missing, install it on the login node into the shared `/blue` library, then retry. If an external download fails on the compute node, download or cache that data from the login node first.
+
+### 4. Retrieve results
+
+On HiPerGator, the final block of `run_all_scales.R` creates a `.zip` archive of `scale_run_folder` for Globus transfer and removes the original results folder. Check that the archive exists and contains the expected files. This archiving step is skipped when running locally.
