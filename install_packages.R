@@ -98,8 +98,18 @@ remotes::install_github(
   dependencies = TRUE,
   upgrade = "never"
 )
+
+cat("\nInstalling fable.gam from GitHub...\n")
+remotes::install_github(
+  "hendersontrent/fable.gam",
+  lib = lib_path,
+  dependencies = TRUE,
+  upgrade = "never"
+)
+
+
 # Confirm installation and test that the key packages can be loaded.
-requested_packages <- c(cran_packages, "cmdstanr", "edenR", "wader")
+requested_packages <- c(cran_packages, "cmdstanr", "edenR", "wader", "fable.gam")
 installed <- rownames(installed.packages(lib.loc = lib_path))
 missing <- setdiff(requested_packages, installed)
 if (length(missing) > 0) {
