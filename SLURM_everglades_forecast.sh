@@ -19,7 +19,7 @@ source /etc/profile.d/modules.sh || exit 1
 module load R/4.6
 export R_LIBS_USER=/blue/ewhite/alexanderblochel/R/libs
 
-# --- Stan cache (must be before Rscript) ---
+# --- Stan cache (dont do compile model everytime within moving window) ---
 export CMDSTAN_CACHE=/blue/ewhite/alexanderblochel/.cmdstan_cache
 mkdir -p $CMDSTAN_CACHE
 
