@@ -4,8 +4,8 @@
 #SBATCH --qos=ewhite
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=32gb
-#SBATCH --time=12:00:00
+#SBATCH --mem=32gb                                                                #cut back ? have 32bg on my laptop  
+#SBATCH --time=72:00:00
 #SBATCH --output=/blue/ewhite/alexanderblochel/logs/forecast_%j.out
 #SBATCH --error=/blue/ewhite/alexanderblochel/logs/forecast_%j.err
 #SBATCH --mail-type=END,FAIL
@@ -29,4 +29,7 @@ Rscript -e "
   source('run_all_scales.R')
 " || exit 1
 
-echo "INFO: [$(date "+%Y-%m-%d %H:%M:%S")] Job completed successfully"
+echo "INFO: [$(date "+%Y-%m-%d %H:%M:%S")] Job completed successfully"  
+
+ 
+
