@@ -542,7 +542,46 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
       n_forecasts = n(),
       .groups = "drop"
     )
+  # =========================================================================
+  # RMSE SKILL SCORES (mvgam)
+  # =========================================================================
+  # Note: RMSE skill for mvgam uses the median as the point 
+  # estimate, while fable uses the mean
   
+  
+  rmse_raw <- all_preds |>
+    left_join(
+      test_data |>
+        as_tibble() |>
+        dplyr::select(species, any_of("region"), year, count),
+      by = c("species", any_of("region"), "year")
+    ) |>
+    group_by(across(all_of(group_vars))) |>
+    summarise(
+      rmse = sqrt(mean((Estimate - count)^2, na.rm = TRUE)),
+      .groups = "drop"
+    )
+  
+  baseline_rmse <- rmse_raw |>
+    filter(model == "baseline") |>
+    dplyr::select(all_of(c(baseline_vars, "rmse"))) |>
+    rename(rmse_baseline = rmse)
+  
+  rmse_scores <- rmse_raw |>
+    left_join(baseline_rmse, by = baseline_vars) |>
+    mutate(
+      rmse_skill = if_else(
+        is.na(rmse_baseline) | is.nan(rmse_baseline) | rmse_baseline == 0,
+        NA_real_,
+        1 - rmse / rmse_baseline
+      )
+    )
+  
+  skills <- skills |>
+    left_join(
+      rmse_scores |> dplyr::select(all_of(c(group_vars, "rmse", "rmse_skill"))),
+      by = group_vars
+    )
   # =========================================================================
   # RPS
   # =========================================================================
