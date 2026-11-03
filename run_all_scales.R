@@ -339,6 +339,12 @@ extract_model_metrics <- function(folder_path, scale_name, framework) {
     metrics <- res$fable$metrics |> rename(model = .model)
   }
   
+  # FIX: guard against metrics with no "model" column (every CV window failed)
+  if (!"model" %in% names(metrics)) {
+    warning(glue("No 'model' column in metrics for scale={scale_name}. All CV windows likely failed. Skipping."))
+    return(NULL)
+  }
+  
   if (!"window" %in% names(metrics)) {
     warning(glue("No 'window' column in metrics for scale={scale_name}. Skipping."))
     return(NULL)
@@ -347,9 +353,9 @@ extract_model_metrics <- function(folder_path, scale_name, framework) {
   metrics |>
     as_tibble() |>
     dplyr::select(
-      model,
+      any_of("model"),
       any_of(c("species", "region")),
-      window,
+      any_of("window"),
       any_of("test_start"),
       any_of(c("crps_skill", "rps_skill", "rmse_skill", "log_skill"))
     ) |>
