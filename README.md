@@ -3,7 +3,7 @@
 A comparative forecasting framework for Everglades wading bird populations using dynamic GAMs and traditional time series models.
 
 ## Overview
-This project implements sliding window cross-validation to compare multiple forecasting approaches for wading bird populations in the Florida Everglades. Models incorporate water management covariates and evaluate predictions using both numeric (CRPS) and ordinal (RPS) metrics.
+This project implements sliding window cross-validation to compare multiple forecasting approaches for wading bird populations in the Florida Everglades. Models incorporate water management covariates and evaluate predictions using probabilistic numeric accuracy (CRPS), point-forecast accuracy (RMSE), and ordinal accuracy (RPS).
 
 **Species Options:**
 The pipeline dynamically handles species filtering based on configuration:
@@ -136,6 +136,30 @@ Continuous Ranked Probability Score
 Measures: How close is predicted distribution to actual count?
 Lower = Better
 ```
+
+### RMSE (numeric point-forecast accuracy)
+Root Mean Squared Error measures the difference between point forecasts and observed counts:
+
+```text
+RMSE = sqrt(mean((prediction - observed_count)^2))
+```
+
+RMSE is expressed in the same units as the observed counts and penalizes large errors more strongly than small errors.
+
+**Lower = Better.**
+
+The pipeline calculates RMSE within each cross-validation test window, separately for each model and species, and each region where applicable.
+
+Point forecasts differ between frameworks:
+- **mvgam:** Uses the predictive median (`Estimate`, extracted from `predQ50`).
+- **fable:** Uses the predictive mean (`.mean`).
+
+This distinction should be considered when comparing RMSE across frameworks. For a one-year test window with one observation per series, RMSE equals the absolute forecast error.
+
+RMSE is calculated independently of ordinal evaluation: disabling `use_ordinal` does not disable RMSE.
+
+
+
 # RPS (Ordinal)
 ```
 Ranked Probability Score
@@ -157,12 +181,20 @@ Step 3: Score predicted probabilities vs actual category
 
 # skill score
 ```
-skill_score = 1 - (model_score / baseline_score)
+crps_skill = 1 - (model_crps / baseline_crps)
+rmse_skill = 1 - (model_rmse / baseline_rmse)
+rps_skill  = 1 - (model_rps / baseline_rps)
+
 
 > 0: Better than baseline
 = 0: Same as baseline
 < 0: Worse than baseline
 ```
+
+A successful baseline forecast is required to calculate skill scores.
+Missing baseline scores or baseline scores of zero produce `NA`
+because the ratio cannot be calculated.
+
 
 ## Visualization
 
@@ -173,7 +205,25 @@ Four plots generated per model framework:
     - Combined Metrics - All metrics in faceted grid
     - Best Model Counts - Winner frequency by species
     
-  
+ 
+The `run_all_scales.R` wrapper includes available CRPS, RMSE, and RPS
+skill scores in:
+- Per-model window skill plots by spatial scale.
+- Per-model and cross-model window delta plots.
+- Marginal distribution plots.
+- Density, ECDF, and violin plots of skill deltas.
+- Per-window CSV outputs and aggregated summaries.
+
+RMSE appears under the **RMSE Skill** label.
+```text
+delta_skill = system_skill - subregion_skill
+
+Positive: System has higher skill relative to its baseline.
+Negative: Subregion has higher skill relative to its baseline.
+```
+
+These deltas compare baseline-relative skill, not raw RMSE values.
+
 ***All settings controlled via config.yml. Key options:***  
 ```r 
 default:
