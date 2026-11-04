@@ -357,7 +357,7 @@ extract_model_metrics <- function(folder_path, scale_name, framework) {
       any_of(c("species", "region")),
       any_of("window"),
       any_of("test_start"),
-      any_of(c("crps_skill", "rps_skill", "rmse_skill", "log_skill"))
+      any_of(c("crps_skill", "rps_skill", "rmse_skill"))
     ) |>
     mutate(framework = framework, scale = scale_name)
 }
@@ -382,7 +382,7 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
 } else {
   
   skill_metrics <- intersect(
-    c("crps_skill", "rps_skill", "rmse_skill", "log_skill"),
+    c("crps_skill", "rps_skill", "rmse_skill"),
     names(all_window_metrics)  )
   has_test_start <- "test_start" %in% names(all_window_metrics)
   
@@ -399,7 +399,7 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
         metric == "crps_skill" ~ "CRPS Skill",
         metric == "rps_skill"  ~ "RPS Skill",
         metric == "rmse_skill" ~ "RMSE Skill",
-        metric == "log_skill"  ~ "Log Score Skill",
+        # metric == "log_skill"  ~ "Log Score Skill",
         TRUE ~ metric
       ),
       window_start_year = extract_window_start_year(

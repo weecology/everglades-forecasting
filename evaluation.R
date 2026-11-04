@@ -287,57 +287,56 @@ calculate_rps_mvgam <- function(predictions, test_data, train_data, config,
     )
 }
 # log-score calculation 
-calculate_log_score <- function(forecasts, observations,
-                                model_col = "model",
-                                has_region = FALSE) {
-  
-  join_vars <- c("species", if (has_region) "region", "year")
-  
-  scored <- forecasts |>
-    left_join(
-      observations |>
-        as_tibble() |>
-        dplyr::select(all_of(c(join_vars, "count"))),
-      by = join_vars
-    ) |>
-    mutate(
-      # Negative log predictive density: lower is better
-      log_score = -log(
-        pmax(
-          distributional::density(count_distribution, count),
-          .Machine$double.xmin
-        )
-      )
-    )
-  
-  group_vars <- c(model_col, "species", if (has_region) "region")
-  
-  log_scores <- scored |>
-    group_by(across(all_of(group_vars))) |>
-    summarise(
-      log_score = mean(log_score, na.rm = TRUE),
-      .groups = "drop"
-    )
-  
-  baseline_vars <- c("species", if (has_region) "region")
-  
-  baseline_log <- log_scores |>
-    filter(.data[[model_col]] == "baseline") |>
-    dplyr::select(all_of(c(baseline_vars, "log_score"))) |>
-    rename(log_score_baseline = log_score)
-  
-  log_scores |>
-    left_join(baseline_log, by = baseline_vars) |>
-    mutate(
-      log_skill = if_else(
-        is.na(log_score_baseline) |
-          is.nan(log_score_baseline) |
-          log_score_baseline == 0,
-        NA_real_,
-        1 - log_score / log_score_baseline
-      )
-    )
-}
+# calculate_log_score <- function(forecasts, observations,
+#                                 model_col = "model",
+#                                 has_region = FALSE) {
+#   
+#   join_vars <- c("species", if (has_region) "region", "year")
+#   
+#   scored <- forecasts |>
+#     left_join(
+#       observations |>
+#         as_tibble() |>
+#         dplyr::select(all_of(c(join_vars, "count"))),
+#       by = join_vars
+#     ) |>
+#     mutate(
+#       log_score = -log(
+#         pmax(
+#           mapply(function(d, x) density(d, at = x), count_distribution, count),
+#           .Machine$double.xmin
+#         )
+#       )
+#     )
+#   
+#   group_vars <- c(model_col, "species", if (has_region) "region")
+#   
+#   log_scores <- scored |>
+#     group_by(across(all_of(group_vars))) |>
+#     summarise(
+#       log_score = mean(log_score, na.rm = TRUE),
+#       .groups = "drop"
+#     )
+#   
+#   baseline_vars <- c("species", if (has_region) "region")
+#   
+#   baseline_log <- log_scores |>
+#     filter(.data[[model_col]] == "baseline") |>
+#     dplyr::select(all_of(c(baseline_vars, "log_score"))) |>
+#     rename(log_score_baseline = log_score)
+#   
+#   log_scores |>
+#     left_join(baseline_log, by = baseline_vars) |>
+#     mutate(
+#       log_skill = if_else(
+#         is.na(log_score_baseline) |
+#           is.nan(log_score_baseline) |
+#           log_score_baseline == 0,
+#         NA_real_,
+#         1 - log_score / log_score_baseline
+#       )
+#     )
+# }
 
 
 #' Main mvgam forecasting and evaluation function
@@ -537,14 +536,14 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
   
   # Approximate each mvgam predictive distribution as Normal using its
   # central 95% interval.
-  log_forecasts <- all_preds |>
-    mutate(
-      pred_sd = pmax((Q97.5 - Q2.5) / (2 * 1.96), 0.1),
-      count_distribution = distributional::dist_normal(
-        mu    = Estimate,
-        sigma = pred_sd
-      )
-    )
+  # log_forecasts <- all_preds |>
+  #   mutate(
+  #     pred_sd = pmax((Q97.5 - Q2.5) / (2 * 1.96), 0.1),
+  #     count_distribution = distributional::dist_normal(
+  #       mu    = Estimate,
+  #       sigma = pred_sd
+  #     )
+  #   )
   
   all_crps <- bind_rows(lapply(results, function(x) x$crps))
   
@@ -613,13 +612,32 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
   # Note: RMSE skill for mvgam uses the median as the point 
   # estimate, while fable uses the mean
   
+  # keeping this here for now... 
+  # rmse_raw <- all_preds |>
+  #   left_join(
+  #     test_data |>
+  #       as_tibble() |>
+  #       dplyr::select(species, any_of("region"), year, count),
+  #     by = c("species", any_of("region"), "year")
+  #   ) |>
+  #   group_by(across(all_of(group_vars))) |>
+  #   summarise(
+  #     rmse = sqrt(mean((Estimate - count)^2, na.rm = TRUE)),
+  #     .groups = "drop"
+  #   )
+  
+  rmse_join_vars <- c(
+    "species",
+    if (has_region_crps) "region",
+    "year"
+  )
   
   rmse_raw <- all_preds |>
     left_join(
       test_data |>
         as_tibble() |>
-        dplyr::select(species, any_of("region"), year, count),
-      by = c("species", any_of("region"), "year")
+        dplyr::select(all_of(c(rmse_join_vars, "count"))),
+      by = rmse_join_vars
     ) |>
     group_by(across(all_of(group_vars))) |>
     summarise(
@@ -652,25 +670,25 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
   # LOG SCORE SKILL
   # =========================================================================
   
-  log_scores <- calculate_log_score(
-    forecasts    = log_forecasts,
-    observations = test_data,
-    model_col    = "model",
-    has_region   = has_region_crps
-  )
-  
-  log_join_vars <- if (has_region_crps) {
-    c("model", "species", "region")
-  } else {
-    c("model", "species")
-  }
-  
-  skills <- skills |>
-    left_join(
-      log_scores |>
-        dplyr::select(all_of(c(log_join_vars, "log_score", "log_skill"))),
-      by = log_join_vars
-    )
+  # log_scores <- calculate_log_score(
+  #   forecasts    = log_forecasts,
+  #   observations = test_data,
+  #   model_col    = "model",
+  #   has_region   = has_region_crps
+  # )
+  # 
+  # log_join_vars <- if (has_region_crps) {
+  #   c("model", "species", "region")
+  # } else {
+  #   c("model", "species")
+  # }
+  # 
+  # skills <- skills |>
+  #   left_join(
+  #     log_scores |>
+  #       dplyr::select(all_of(c(log_join_vars, "log_score", "log_skill"))),
+  #     by = log_join_vars
+  #   )
   
   # =========================================================================
   # RPS
@@ -844,32 +862,32 @@ make_fable_evaluation <- function(raw_metrics, forecasts, test_data,
   # LOG SCORE SKILL
   # =========================================================================
   
-  log_forecasts <- forecasts |>
-    as_tibble() |>
-    mutate(
-      count_distribution = count,
-      model = .model
-    )
-  
-  log_scores <- calculate_log_score(
-    forecasts    = log_forecasts,
-    observations = test_data,
-    model_col    = "model",
-    has_region   = has_region
-  ) |>
-    rename(.model = model)
-  
-  log_join_vars <- c(
-    ".model",
-    if (has_region) c("species", "region") else "species"
-  )
-  
-  metrics <- metrics |>
-    left_join(
-      log_scores |>
-        dplyr::select(all_of(c(log_join_vars, "log_score", "log_skill"))),
-      by = log_join_vars
-    )
+  # log_forecasts <- forecasts |>
+  #   as_tibble() |>
+  #   mutate(
+  #     count_distribution = count,
+  #     model = .model
+  #   )
+  # 
+  # log_scores <- calculate_log_score(
+  #   forecasts    = log_forecasts,
+  #   observations = test_data,
+  #   model_col    = "model",
+  #   has_region   = has_region
+  # ) |>
+  #   rename(.model = model)
+  # 
+  # log_join_vars <- c(
+  #   ".model",
+  #   if (has_region) c("species", "region") else "species"
+  # )
+  # 
+  # metrics <- metrics |>
+  #   left_join(
+  #     log_scores |>
+  #       dplyr::select(all_of(c(log_join_vars, "log_score", "log_skill"))),
+  #     by = log_join_vars
+  #   )
   
   # =========================================================================
   # RPS
