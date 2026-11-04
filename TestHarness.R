@@ -287,6 +287,6 @@ test_data_loading <- function() {
 # EXAMPLE USAGE
 # =============================================================================
 # Uncomment the test you want to run:
-# Test baseline model quickly
+# Test ar model quickly
 # test_single_model("ar", framework = "mvgam", use_full_data = FALSE)
 # Test
