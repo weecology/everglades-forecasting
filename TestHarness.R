@@ -1,9 +1,7 @@
 # =============================================================================
 # TEST_HARNESS.R - Isolated testing of pipeline components
 # =============================================================================
-
 # =============================================================================
-
 # # HiPerGator-specific fix for module conflicts
 # if (dir.exists("/apps")) {
 #   # Manually load UDUNITS without needing the module 'loaded' in the shell
@@ -18,22 +16,17 @@
 #     dyn.load(gdal_path)
 #   }
 # }
-# 
+#
 # # Load the personal library path defined in your setup [2]
 # .libPaths("~/R/libs")
 # library('units')
 # library('sf')
 # library('stars')
-
 # =============================================================================
-
-
-
 library(dplyr)
 library(mvgam)
 library(glue)
 library(future)
-
 # Handle namespace conflicts for the test harness
 conflicted::conflicts_prefer(dplyr::filter,   .quiet = TRUE)
 conflicted::conflicts_prefer(dplyr::select,   .quiet = TRUE)
@@ -42,11 +35,9 @@ conflicted::conflicts_prefer(mvgam::VAR,      .quiet = TRUE)
 conflicted::conflicts_prefer(mvgam::RW,       .quiet = TRUE)
 conflicted::conflicts_prefer(base::as.matrix, .quiet = TRUE)
 conflicted::conflicts_prefer(base::get,       .quiet = TRUE)
-
 # Load necessary functions
 source("data_functions.R")
 source("evaluation.R")
-
 # =============================================================================
 # CONFIGURATION FOR TESTING
 # =============================================================================
@@ -59,7 +50,7 @@ TEST_CONFIG <- list(
     include_unknowns = FALSE,
     forecast_totals = TRUE,
     run_by_region = FALSE,
-    exclude_regions = c("bigcypress", "coastal") 
+    exclude_regions = c("bigcypress", "coastal")
   ),
   
   # Minimal MCMC for fast testing
@@ -70,7 +61,7 @@ TEST_CONFIG <- list(
   # CV settings
   train_years = 5,
   test_years = 1,
-  cv_windows = 1, 
+  cv_windows = 1,
   
   # Evaluation
   use_ordinal = TRUE,  
@@ -81,7 +72,7 @@ TEST_CONFIG <- list(
   # Model settings
   family = "nb",
   
-  # Parallel 
+  # Parallel
   parallel = list(
     enabled = TRUE,
     workers = 2
@@ -96,16 +87,14 @@ TEST_CONFIG <- list(
   # Data type
   data_type = "observed"
 )
-
 # Make it globally available
 CONFIG <- TEST_CONFIG
-
 # =============================================================================
 # TEST FUNCTIONS
 # =============================================================================
-
-#' Test a single model in isolation
-#' @param model_name Name of the model (e.g., "baseline", "ar", "trait")
+#' Test one or more models in isolation
+#' @param model_name Name(s) of the model(s) (e.g., "baseline", "ar", "trait",
+#'   or c("baseline", "ar") to compare multiple models in the same CV windows)
 #' @param framework Either "mvgam" or "fable"
 #' @param use_full_data If FALSE, uses only recent years
 #' @param parallel If TRUE, runs CV windows in parallel
@@ -117,7 +106,7 @@ test_single_model <- function(model_name,
                               workers = NULL) {
   
   cat("\n", paste(rep("=", 70), collapse = ""), "\n", sep = "")
-  cat(glue("TESTING: {framework}_{model_name} (Parallel: {parallel})\n"))
+  cat(glue("TESTING: {framework}_{paste(model_name, collapse = ', ')} (Parallel: {parallel})\n"))
   cat(paste(rep("=", 70), collapse = ""), "\n\n", sep = "")
   
   # Load data
@@ -134,23 +123,28 @@ test_single_model <- function(model_name,
   
   cat(glue("Data: {nrow(data)} rows, {n_distinct(data$species)} species\n\n"))
   
-  # Load the specific model file
+  # Load the specific model file(s) — now supports a vector of model names
   if (framework == "mvgam") {
-    model_file <- file.path("models", paste0("mvgam_", model_name, ".R"))
-    if (!file.exists(model_file)) {
-      stop("Model file not found: ", model_file)
+    for (m in model_name) {
+      model_file <- file.path("models", paste0("mvgam_", m, ".R"))
+      if (!file.exists(model_file)) {
+        stop("Model file not found: ", model_file)
+      }
+      source(model_file)
+      cat(glue("✓ Loaded {model_file}\n"))
     }
-    source(model_file)
-    cat(glue("✓ Loaded {model_file}\n\n"))
+    cat("\n")
     
-    # Run the model through CV with dynamic parallel arguments and wrapper fix
+    # Run the model(s) through CV with dynamic parallel arguments and wrapper fix
     results <- fit_sliding_window(
       data = data,
       # --- WRAPPER FOR PARALLEL WORKERS ---
       make_forecast = function(train, test, ...) {
         source("evaluation.R", local = FALSE)
         source(file.path("models", "mvgam_baseline.R"), local = FALSE)
-        source(file.path("models", paste0("mvgam_", model_name, ".R")), local = FALSE)
+        for (m in model_name) {
+          source(file.path("models", paste0("mvgam_", m, ".R")), local = FALSE)
+        }
         make_mvgam_forecasts(train, test, ...)
       },
       # ------------------------------------
@@ -201,7 +195,6 @@ test_single_model <- function(model_name,
   
   return(results)
 }
-
 #' Test with a single CV window and custom train/test split
 #' @param train_start First year of training data
 #' @param test_start First year of test data
@@ -261,7 +254,6 @@ test_single_window <- function(model_name,
   
   return(result)
 }
-
 #' Test data loading with different configurations
 test_data_loading <- function() {
   
@@ -291,23 +283,10 @@ test_data_loading <- function() {
     cat(glue("  Years: {min(data$year)}-{max(data$year)}\n"))
   }
 }
-
 # =============================================================================
 # EXAMPLE USAGE
 # =============================================================================
 # Uncomment the test you want to run:
 # Test baseline model quickly
-# test_single_model("baseline", framework = "mvgam", use_full_data = FALSE)
-# Test trait model with full data
-# test_single_model("trait", framework = "mvgam", use_full_data = TRUE)
-# Test a specific window
-# test_single_window("baseline", train_start = 2010, test_start = 2018)
-# Test data loading
-# test_data_loading()
-
-cat("\n✓ Test harness loaded. Run test functions as needed.\n")
-cat("Examples:\n")
-cat("  test_single_model('baseline')\n")
-cat("  test_single_model('ar', use_full_data = TRUE, parallel = TRUE)\n")
-cat("  test_single_window('baseline', train_start = 2010, test_start = 2018)\n")
-cat("  test_data_loading()\n\n")
+# test_single_model("ar", framework = "mvgam", use_full_data = FALSE)
+# Test

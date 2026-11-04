@@ -301,10 +301,9 @@ calculate_log_score <- function(forecasts, observations,
       by = join_vars
     ) |>
     mutate(
-      # Negative log predictive density: lower is better
       log_score = -log(
         pmax(
-          distributional::density(count_distribution, count),
+          mapply(function(d, x) density(d, at = x), count_distribution, count),
           .Machine$double.xmin
         )
       )
@@ -613,13 +612,32 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
   # Note: RMSE skill for mvgam uses the median as the point 
   # estimate, while fable uses the mean
   
+  # keeping this here for now... 
+  # rmse_raw <- all_preds |>
+  #   left_join(
+  #     test_data |>
+  #       as_tibble() |>
+  #       dplyr::select(species, any_of("region"), year, count),
+  #     by = c("species", any_of("region"), "year")
+  #   ) |>
+  #   group_by(across(all_of(group_vars))) |>
+  #   summarise(
+  #     rmse = sqrt(mean((Estimate - count)^2, na.rm = TRUE)),
+  #     .groups = "drop"
+  #   )
+  
+  rmse_join_vars <- c(
+    "species",
+    if (has_region_crps) "region",
+    "year"
+  )
   
   rmse_raw <- all_preds |>
     left_join(
       test_data |>
         as_tibble() |>
-        dplyr::select(species, any_of("region"), year, count),
-      by = c("species", any_of("region"), "year")
+        dplyr::select(all_of(c(rmse_join_vars, "count"))),
+      by = rmse_join_vars
     ) |>
     group_by(across(all_of(group_vars))) |>
     summarise(
