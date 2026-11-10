@@ -20,49 +20,121 @@ translate_level_for_wader <- function(level) {
 # =============================================================================
 # WATER DATA
 # =============================================================================
-get_data_water <- function(eden_path = "WaterData", update = FALSE, max_age_days = 7) {
+get_data_water <- function(
+    eden_path = "WaterData",
+    remote_url,
+    update = FALSE
+) {
+  if (!requireNamespace("httr2", quietly = TRUE)) {
+    stop("Install httr2 first: install.packages('httr2')")
+  }
+  
+  dir.create(eden_path, recursive = TRUE, showWarnings = FALSE)
   
   water_file <- file.path(eden_path, "eden_covariates.csv")
+  metadata_file <- file.path(eden_path, "eden_remote_metadata.rds")
   
-  # Auto-trigger update if file is missing or older than max_age_days
-  needs_update <- update ||
-    !file.exists(water_file) || {
-      stamp <- file.info(water_file)$mtime
-      is.na(stamp) || difftime(Sys.time(), stamp, units = "days") > max_age_days
+  # Retrieve metadata without downloading the remote file's body.
+  remote <- tryCatch({
+    response <- httr2::request(remote_url) |>
+      httr2::req_method("HEAD") |>
+      httr2::req_timeout(30) |>
+      httr2::req_perform()
+    
+    last_modified <- httr2::resp_header(response, "last-modified")
+    
+    if (is.null(last_modified) || !nzchar(last_modified)) {
+      stop("Remote server did not provide a Last-Modified header.")
     }
+    
+    list(
+      url = remote_url,
+      last_modified = last_modified
+    )
+  }, error = function(e) {
+    if (!file.exists(water_file)) {
+      stop(
+        "Remote check failed and no local cache exists: ",
+        conditionMessage(e)
+      )
+    }
+    
+    warning(
+      "Remote check failed: ", conditionMessage(e),
+      ". Using the existing cache unless update = TRUE.",
+      call. = FALSE
+    )
+    
+    NULL
+  })
+  
+  saved <- if (file.exists(metadata_file)) {
+    tryCatch(
+      readRDS(metadata_file),
+      error = function(e) NULL
+    )
+  } else {
+    NULL
+  }
+  
+  # Compare remote metadata with the version previously processed.
+  remote_changed <- !is.null(remote) && (
+    is.null(saved) ||
+      !identical(remote$url, saved$url) ||
+      !identical(remote$last_modified, saved$last_modified)
+  )
+  
+  needs_update <- isTRUE(update) ||
+    !file.exists(water_file) ||
+    remote_changed
   
   if (needs_update) {
-    cat("📥 Downloading fresh EDEN water data...\n")
+    cat("Refreshing EDEN water data...\n")
+    
     edenR::update_water(eden_path)
-    water <- get_eden_covariates(eden_path = eden_path, level = "subregions") |>
-      bind_rows(get_eden_covariates(eden_path = eden_path, level = "all")) |>
-      bind_rows(get_eden_covariates(eden_path = eden_path, level = "wcas")) |>
+    
+    water_long <- get_eden_covariates(
+      eden_path = eden_path,
+      level = "subregions"
+    ) |>
+      dplyr::bind_rows(
+        get_eden_covariates(eden_path = eden_path, level = "all"),
+        get_eden_covariates(eden_path = eden_path, level = "wcas")
+      )
+    
+    # Remove spatial geometry before converting to the cached table.
+    if (inherits(water_long, "sf")) {
+      water_long <- sf::st_drop_geometry(water_long)
+    }
+    
+    water <- water_long |>
+      tibble::as_tibble() |>
       dplyr::select(year, region = Name, variable, value) |>
-      as.data.frame() |>
-      dplyr::select(-geometry) |>
-      pivot_wider(names_from = "variable", values_from = "value") |>
-      mutate(year = as.integer(year)) |>
-      arrange(year, region)
+      tidyr::pivot_wider(
+        names_from = variable,
+        values_from = value
+      ) |>
+      dplyr::mutate(year = as.integer(year)) |>
+      dplyr::arrange(year, region)
     
-    write_csv(water, water_file)
-    cat(glue::glue(
-      "✓ Water data updated and saved to {water_file}\n",
-      "  Years: {min(water$year)}-{max(water$year)}\n",
-      "  Regions: {paste(unique(water$region), collapse = ', ')}\n"
-    ))
+    readr::write_csv(water, water_file)
     
+    # Save remote metadata only after the refresh succeeds.
+    if (!is.null(remote)) {
+      saveRDS(remote, metadata_file)
+    } else if (file.exists(metadata_file)) {
+      # A forced refresh without verified metadata needs a future recheck.
+      unlink(metadata_file)
+    }
+    
+    cat("Updated cache:", water_file, "\n")
   } else {
-    water <- read_csv(water_file, show_col_types = FALSE)
-    # 
-    age_days <- round(as.numeric(difftime(Sys.time(),
-                                          file.info(water_file)$mtime,
-                                          units = "days")), 1)
-    cat(glue::glue(
-      "✓ Water data loaded from: {water_file}\n",
-      "  Years: {min(water$year)}-{max(water$year)}\n",
-      "  Regions: {paste(unique(water$region), collapse = ', ')}\n",
-      "  Last modified: {format(file.info(water_file)$mtime, '%Y-%m-%d')} ({age_days} days old)\n"
-    ))
+    water <- readr::read_csv(
+      water_file,
+      show_col_types = FALSE
+    )
+    
+    cat("Using cached water data:", water_file, "\n")
   }
   
   return(water)
