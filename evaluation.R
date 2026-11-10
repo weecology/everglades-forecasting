@@ -1,1001 +1,987 @@
 # =============================================================================
-# EVALUATION.R - Cross-validation and forecast evaluation
-# Handles both system-wide (species only) and subregional (species x region)
-# Consistent evaluation for both mvgam and fable frameworks
+# EVALUATION.R
+#
+# Outputs:
+#   forecasts     : tidy predictions for existing plots
+#   metrics       : CRPS / RMSE / optional RPS and baseline-relative skills
+#   cv_info       : cross-validation settings
+#   window_objects: original forecast objects and data for every window
+#
+# Existing model return format remains:
+#   list(fc = fc, crps = crps)
+#
+# Window fits remain sequential, matching the original implementation.
+# Do not truncate test_data to control a multi-series forecast horizon.
 # =============================================================================
+
 library(dplyr)
 library(tidyr)
-library(verification)
 library(distributional)
 library(future)
-library(furrr)
-library(progressr)
+
+`%||%` <- function(x, y) if (is.null(x)) y else x
+
+# =============================================================================
+# CONFIGURATION AND COMMON UTILITIES
+# =============================================================================
 
 guard_config_init <- function() {
-  if (isTRUE(CONFIG$.skip_config_init)) {
-    cat("ℹ CONFIG already initialized by run_all_scales.R — skipping config::get()\n")
-    return(invisible(NULL))
+  # Never overwrite a CONFIG supplied by run_all_scales.R.
+  if (!exists("CONFIG", inherits = TRUE)) {
+    assign("CONFIG", config::get(), envir = .GlobalEnv)
   }
+  invisible(NULL)
+}
+
+get_evaluation_config <- function() {
+  if (!exists("CONFIG", inherits = TRUE)) {
+    stop("CONFIG must be initialized before evaluation.")
+  }
+  get("CONFIG", inherits = TRUE)
+}
+
+positive_integer <- function(x, name) {
+  if (length(x) != 1L || !is.numeric(x) ||
+      !is.finite(x) || x < 1 || x != floor(x)) {
+    stop(name, " must be a positive integer.")
+  }
+  as.integer(x)
+}
+
+finite_mean <- function(x) {
+  x <- x[is.finite(x)]
+  if (length(x)) mean(x) else NA_real_
+}
+
+safe_skill <- function(value, baseline) {
+  out <- rep(NA_real_, length(value))
+  valid <- is.finite(value) & is.finite(baseline) & baseline > 0
+  out[valid] <- 1 - value[valid] / baseline[valid]
+  out
+}
+
+evaluation_keys <- function(df) {
+  keys <- "species"
+  if ("region" %in% names(df)) keys <- c(keys, "region")
+  keys
+}
+
+assert_unique_rows <- function(df, keys, label) {
+  if (anyDuplicated(as.data.frame(df[keys]))) {
+    stop(label, " has duplicate rows for: ", paste(keys, collapse = ", "))
+  }
+  invisible(NULL)
+}
+
+add_baseline_skill <- function(df, model_col, keys, metric) {
+  baseline_col <- paste0(metric, "_baseline")
+  skill_col <- paste0(metric, "_skill")
+  
+  # Allow this helper to be called again safely.
+  df <- df |>
+    dplyr::select(-any_of(c(baseline_col, skill_col)))
+  
+  baseline <- df |>
+    dplyr::filter(.data[[model_col]] == "baseline") |>
+    dplyr::select(all_of(c(keys, metric)))
+  
+  assert_unique_rows(baseline, keys, paste(metric, "baseline"))
+  
+  names(baseline)[names(baseline) == metric] <- baseline_col
+  
+  df <- dplyr::left_join(df, baseline, by = keys)
+  df[[skill_col]] <- safe_skill(df[[metric]], df[[baseline_col]])
+  df
+}
+
+empty_window_result <- function() {
+  list(
+    predictions = tibble(),
+    metrics = tibble(),
+    fc_objects = list()
+  )
 }
 
 # =============================================================================
-# PARALLEL PROCESSING
+# PARALLEL PLAN UTILITIES
 # =============================================================================
+
 setup_parallel <- function(enabled = TRUE, workers = NULL) {
-  if (!enabled) {
-    plan(sequential)
-    return(list(enabled = FALSE, workers = 1))
+  if (!isTRUE(enabled)) {
+    future::plan(future::sequential)
+    return(list(enabled = FALSE, workers = 1L))
   }
   
   if (is.null(workers)) {
-    workers <- max(1, parallel::detectCores() - 1)
+    workers <- parallelly::availableCores()
+    workers <- max(1L, as.integer(workers) - 1L)
   }
   
-  plan(multisession, workers = workers)
-  cat(glue::glue("✓ Parallel processing enabled: {workers} workers\n"))
+  workers <- positive_integer(workers, "workers")
+  future::plan(future::multisession, workers = workers)
   
-  return(list(enabled = TRUE, workers = workers))
+  cat("Parallel plan configured:", workers, "workers\n")
+  list(enabled = TRUE, workers = workers)
 }
 
 teardown_parallel <- function() {
-  plan(sequential)
+  future::plan(future::sequential)
+  invisible(NULL)
 }
 
 # =============================================================================
-# SLIDING WINDOW CROSS-VALIDATION
+# SLIDING-WINDOW CROSS-VALIDATION
 # =============================================================================
+
 fit_sliding_window <- function(data,
                                make_forecast,
                                train_years,
                                test_years,
                                cv_windows = NULL,
-                               parallel   = FALSE,
-                               workers    = NULL,
+                               parallel = FALSE,
+                               workers = NULL,
                                ...) {
+  config <- get_evaluation_config()
+  train_years <- positive_integer(train_years, "train_years")
+  test_years <- positive_integer(test_years, "test_years")
   
-  year_min <- min(data$year)
-  year_max <- max(data$year)
-  
-  train_starts <- year_min:(year_max - train_years - test_years + 1)
-  test_starts  <- train_starts + train_years
-  
-  if (!is.null(cv_windows) && cv_windows < length(train_starts)) {
-    train_starts <- tail(train_starts, cv_windows)
-    test_starts  <- tail(test_starts,  cv_windows)
-    cat(glue::glue("ℹ Using last {cv_windows} CV windows\n"))
+  if (!nrow(data) || !"year" %in% names(data)) {
+    stop("data must contain observations and a year column.")
   }
   
+  years <- sort(unique(data$year))
+  
+  if (anyNA(years) || !is.numeric(years) ||
+      any(!is.finite(years)) || any(years != floor(years))) {
+    stop("year must contain finite, non-missing integer years.")
+  }
+  
+  year_min <- min(years)
+  year_max <- max(years)
+  last_start <- year_max - train_years - test_years + 1L
+  
+  if (last_start < year_min) {
+    stop(
+      "Insufficient years: need at least ",
+      train_years + test_years, " calendar years."
+    )
+  }
+  
+  train_starts <- seq.int(year_min, last_start)
+  
+  if (!is.null(cv_windows)) {
+    cv_windows <- positive_integer(cv_windows, "cv_windows")
+    train_starts <- tail(train_starts, cv_windows)
+  }
+  
+  test_starts <- train_starts + train_years
   n_windows <- length(train_starts)
-  
-  cat(glue::glue("\n=== Cross-Validation Setup ===\n"))
-  cat(glue::glue("  Total years: {year_min}-{year_max}\n"))
-  cat(glue::glue("  Train years: {train_years}\n"))
-  cat(glue::glue("  Test years:  {test_years}\n"))
-  cat(glue::glue("  CV windows:  {n_windows}\n\n"))
-  cat(glue::glue("=== Fitting models across {n_windows} windows ===\n\n"))
-  
-  # Capture extra args for passing to make_fable_evaluation
   dots <- list(...)
   
+  if (isTRUE(parallel)) {
+    message(
+      "CV windows are fitted sequentially in this implementation. ",
+      "The parallel/workers arguments are retained for main.R compatibility."
+    )
+  }
+  
+  cat("\n=== Cross-validation ===\n")
+  cat("Years:", year_min, "-", year_max, "\n")
+  cat("Training years:", train_years, "\n")
+  cat("Forecast/test years:", test_years, "\n")
+  cat("Windows:", n_windows, "\n\n")
+  
   results_list <- lapply(seq_along(train_starts), function(i) {
-    cat(glue::glue(
-      "Window {i}/{n_windows}: ",
-      "Train {train_starts[i]}-{test_starts[i]-1}, ",
-      "Test {test_starts[i]}-{test_starts[i]+test_years-1}\n"
-    ))
+    train_start <- train_starts[i]
+    test_start <- test_starts[i]
+    test_end <- test_start + test_years - 1L
     
-    train_data <- data |> filter(year >= train_starts[i] & year < test_starts[i])
-    test_data  <- data |> filter(year >= test_starts[i]  & year < test_starts[i] + test_years)
+    train_data <- data |>
+      dplyr::filter(year >= train_start, year < test_start)
     
-    # Run forecast function
-    forecast_and_metrics <- tryCatch({
-      make_forecast(train_data, test_data, ...)
+    test_data <- data |>
+      dplyr::filter(year >= test_start, year <= test_end)
+    
+    cat(
+      "Window", i, "/", n_windows,
+      "| Train", train_start, "-", test_start - 1L,
+      "| Test", test_start, "-", test_end, "\n"
+    )
+    
+    error_text <- NULL
+    
+    result <- tryCatch({
+      expected_train <- seq.int(train_start, test_start - 1L)
+      expected_test <- seq.int(test_start, test_end)
+      
+      if (!setequal(unique(train_data$year), expected_train) ||
+          !setequal(unique(test_data$year), expected_test)) {
+        stop("Missing calendar years in this window.")
+      }
+      
+      do.call(make_forecast, c(list(train_data, test_data), dots))
     }, error = function(e) {
-      warning(glue::glue("Window {i} failed: {e$message}"))
-      list(tibble(), tibble())
+      error_text <<- conditionMessage(e)
+      warning("Window ", i, " failed: ", error_text, call. = FALSE)
+      empty_window_result()
     })
     
-    fc_raw  <- forecast_and_metrics[[1]]
-    met_raw <- forecast_and_metrics[[2]]
-    
-    # -----------------------------------------------------------------------
-    # FABLE: compute skill scores here (raw metrics come from fable_models.R)
-    # -----------------------------------------------------------------------
-    is_fable <- inherits(fc_raw, "fable") ||
-      (is.data.frame(fc_raw) && ".model" %in% names(fc_raw) &&
-         "count" %in% names(fc_raw) && inherits(fc_raw$count, "distribution"))
-    
-    if (is_fable && !is.null(met_raw) && nrow(met_raw) > 0) {
-      met_out <- tryCatch({
-        make_fable_evaluation(
-          raw_metrics        = met_raw,
-          forecasts          = fc_raw,
-          test_data          = test_data,
-          train_data         = train_data,
-          config             = CONFIG,
-          precomputed_breaks = dots$precomputed_breaks,
-          use_ordinal        = dots$use_ordinal %||% FALSE
-        ) |>
-          as_tibble() |>
-          mutate(test_start = test_starts[i], window = i)
-      }, error = function(e) {
-        warning(glue::glue("Fable evaluation window {i}: {e$message}"))
-        tibble()
-      })
-    } else {
-      # mvgam or empty - metrics already computed
-      met_out <- tryCatch({
-        met_raw |>
-          as_tibble() |>
-          mutate(test_start = test_starts[i], window = i)
-      }, error = function(e) tibble())
+    if (is.null(result) || length(result) < 2L) {
+      error_text <- error_text %||% "Forecast function returned no usable result."
+      result <- empty_window_result()
     }
     
-    # Safe forecast conversion
-    fc_out <- tryCatch({
-      fc_raw |>
-        as_tibble() |>
-        mutate(test_start = test_starts[i], window = i)
-    }, error = function(e) {
-      warning(glue::glue("Could not convert forecasts window {i}: {e$message}"))
-      tibble()
-    })
+    # First two elements preserve the existing calling contract.
+    fc_raw <- result[[1]]
+    met_raw <- result[[2]]
+    raw_models <- result$fc_objects %||% list()
     
-    list(forecasts = fc_out, metrics = met_out)
+    is_fable <- inherits(fc_raw, "fbl_ts") ||
+      inherits(fc_raw, "fable") ||
+      (
+        is.data.frame(fc_raw) &&
+          ".model" %in% names(fc_raw) &&
+          "count" %in% names(fc_raw) &&
+          inherits(fc_raw$count, "distribution")
+      )
+    
+    if (is_fable) {
+      # Preserve the original fable before conversion to an ordinary tibble.
+      raw_models <- list(fable = fc_raw)
+      
+      met_raw <- tryCatch({
+        make_fable_evaluation(
+          raw_metrics = met_raw,
+          forecasts = fc_raw,
+          test_data = test_data,
+          train_data = train_data,
+          config = config,
+          precomputed_breaks = dots$precomputed_breaks,
+          use_ordinal = dots$use_ordinal %||% FALSE
+        )
+      }, error = function(e) {
+        warning(
+          "Fable evaluation failed in window ", i, ": ",
+          conditionMessage(e), call. = FALSE
+        )
+        tibble()
+      })
+    }
+    
+    tag_window <- function(x) {
+      if (is.null(x) || !nrow(x)) return(tibble())
+      tibble::as_tibble(x) |>
+        dplyr::mutate(test_start = test_start, window = i)
+    }
+    
+    list(
+      forecasts = tag_window(fc_raw),
+      metrics = tag_window(met_raw),
+      object = list(
+        window = i,
+        train_start = train_start,
+        train_end = test_start - 1L,
+        test_start = test_start,
+        test_end = test_end,
+        train_data = tibble::as_tibble(train_data),
+        test_data = tibble::as_tibble(test_data),
+        models = raw_models,
+        error = error_text
+      )
+    )
   })
   
-  cat("\n=== Combining results ===\n")
+  forecasts <- dplyr::bind_rows(lapply(results_list, `[[`, "forecasts"))
+  metrics <- dplyr::bind_rows(lapply(results_list, `[[`, "metrics"))
   
-  forecasts <- bind_rows(lapply(results_list, function(x) x$forecasts))
-  metrics   <- bind_rows(lapply(results_list, function(x) x$metrics))
+  window_objects <- setNames(
+    lapply(results_list, `[[`, "object"),
+    paste0("window_", seq_along(results_list))
+  )
   
-  cat(glue::glue(
-    "✓ Complete! {nrow(forecasts)} forecasts, {nrow(metrics)} metric rows\n\n"
-  ))
+  cat(
+    "\nComplete:", nrow(forecasts), "forecast rows;",
+    nrow(metrics), "metric rows\n"
+  )
   
-  return(list(
+  list(
     forecasts = forecasts,
-    metrics   = metrics,
-    cv_info   = list(
-      n_windows   = n_windows,
+    metrics = metrics,
+    cv_info = list(
+      n_windows = n_windows,
       train_years = train_years,
-      test_years  = test_years
-    )
-  ))
+      test_years = test_years,
+      train_starts = train_starts,
+      test_starts = test_starts
+    ),
+    window_objects = window_objects
+  )
 }
 
 # =============================================================================
-# MVGAM EVALUATION - CENTRALIZED EXTRACTION
+# MVGAM CRPS
 # =============================================================================
-#' Extract CRPS scores from mvgam forecast object
+
 extract_crps_mvgam <- function(forecast_obj, model_name) {
-  crps_raw  <- score(forecast_obj, score = "crps")
-  crps_list <- crps_raw[names(crps_raw) != "all_series"]
+  raw <- mvgam::score(forecast_obj, score = "crps")
+  raw <- raw[names(raw) != "all_series"]
   
-  bind_rows(lapply(names(crps_list), function(sp) {
-    data.frame(
-      series       = sp,
-      score        = crps_list[[sp]]$score,
-      eval_horizon = crps_list[[sp]]$eval_horizon,
-      model        = model_name,
-      stringsAsFactors = FALSE
+  dplyr::bind_rows(lapply(names(raw), function(series_name) {
+    entry <- raw[[series_name]]
+    if (is.null(entry$score) || !length(entry$score)) return(tibble())
+    
+    scores <- as.numeric(entry$score)
+    horizon <- entry$eval_horizon %||% seq_along(scores)
+    
+    if (length(horizon) != length(scores)) {
+      stop("Unexpected CRPS horizon structure for ", series_name)
+    }
+    
+    tibble(
+      series = series_name,
+      score = scores,
+      eval_horizon = horizon,
+      model = model_name
     )
   }))
 }
 
-#' Calculate RPS for mvgam predictions
-calculate_rps_mvgam <- function(predictions, test_data, train_data, config,
-                                precomputed_breaks = NULL) {
-  cat("  Calculating mvgam RPS...\n")
+# =============================================================================
+# MVGAM DATA AND SUMMARY EXTRACTION
+# =============================================================================
+
+prepare_mvgam_data <- function(train_data, test_data) {
+  train <- tibble::as_tibble(train_data)
+  test <- tibble::as_tibble(test_data)
   
-  has_region <- "region" %in% names(test_data) &&
-    length(unique(test_data$region)) > 1
+  keys <- evaluation_keys(train)
   
-  group_vars <- if (has_region) c("species", "region") else "species"
-  
-  if (!is.null(precomputed_breaks)) {
-    quantiles_by_group <- precomputed_breaks
-  } else {
-    quantiles_by_group <- train_data |>
-      as_tibble() |>
-      filter_ordinal_years(config$ordinal_years) |>
-      group_by(across(all_of(group_vars))) |>
-      summarise(
-        low    = quantile(count, config$ordinal_breaks[1], na.rm = TRUE),
-        medium = quantile(count, config$ordinal_breaks[2], na.rm = TRUE),
-        high   = quantile(count, config$ordinal_breaks[3], na.rm = TRUE),
-        .groups = "drop"
-      ) |>
-      fix_zero_breaks()  # FIX: prevent NA categories when training data is all zeros
+  if (!all(c(keys, "year", "count") %in% names(test))) {
+    stop("Training and test data must have matching series keys.")
   }
   
-  join_vars <- if (has_region && "region" %in% names(quantiles_by_group)) {
-    c("species", "region")
-  } else {
-    "species"
+  assert_unique_rows(train, c(keys, "year"), "Training data")
+  assert_unique_rows(test, c(keys, "year"), "Test data")
+  
+  if (anyNA(train[keys]) || anyNA(test[keys])) {
+    stop("Species/region keys must not be missing.")
   }
   
-  test_data_ordinal <- test_data |>
-    as_tibble() |>
-    left_join(quantiles_by_group, by = join_vars) |>
-    rowwise() |>
-    mutate(
-      count_category = cut(
-        count,
-        breaks = c(-Inf, low, medium, high, Inf),
-        labels = c("Low", "Medium", "High", "Very High"),
-        ordered = TRUE
-      )
-    ) |>
-    ungroup()
-  
-  forecasts_probs <- predictions |>
-    left_join(quantiles_by_group, by = join_vars) |>
-    rowwise() |>
-    mutate(
-      pred_sd        = pmax((Q97.5 - Q2.5) / (2 * 1.96), 0.1),
-      prob_low       = pnorm(low,    mean = Estimate, sd = pred_sd),
-      prob_medium    = pnorm(medium, mean = Estimate, sd = pred_sd) - prob_low,
-      prob_high      = pnorm(high,   mean = Estimate, sd = pred_sd) -
-        pnorm(medium, mean = Estimate, sd = pred_sd),
-      prob_very_high = 1 - pnorm(high, mean = Estimate, sd = pred_sd)
-    ) |>
-    ungroup()
-  
-  rps_group_vars <- if (has_region) c("model", "species", "region") else c("model", "species")
-  
-  rps_by_model <- forecasts_probs |>
-    group_by(across(all_of(rps_group_vars))) |>
-    summarise(
-      rps = {
-        cur_species <- unique(species)
-        
-        obs_filtered <- if (has_region) {
-          cur_region <- unique(region)
-          test_data_ordinal |>
-            filter(species == cur_species, region == cur_region)
-        } else {
-          test_data_ordinal |>
-            filter(species == cur_species)
-        }
-        
-        obs_cat  <- obs_filtered |> pull(count_category) |> as.numeric()
-        prob_mat <- pick(prob_low, prob_medium, prob_high, prob_very_high) |>
-          as.matrix()
-        
-        mean(rps(obs_cat, prob_mat)$rps, na.rm = TRUE)
-      },
-      n_forecasts = n(),
-      .groups = "drop"
-    )
-  
-  baseline_join_vars <- if (has_region) c("species", "region") else "species"
-  
-  baseline_rps <- rps_by_model |>
-    filter(model == "baseline") |>
-    dplyr::select(all_of(c(baseline_join_vars, "rps"))) |>
-    rename(rps_baseline = rps)
-  
-  rps_by_model |>
-    left_join(baseline_rps, by = baseline_join_vars) |>
-    mutate(
-      rps_skill = if_else(
-        is.na(rps_baseline) | is.nan(rps_baseline) | rps_baseline == 0,
-        NA_real_,
-        1 - rps / rps_baseline
-      )
-    )
-}
-# log-score calculation 
-# calculate_log_score <- function(forecasts, observations,
-#                                 model_col = "model",
-#                                 has_region = FALSE) {
-#   
-#   join_vars <- c("species", if (has_region) "region", "year")
-#   
-#   scored <- forecasts |>
-#     left_join(
-#       observations |>
-#         as_tibble() |>
-#         dplyr::select(all_of(c(join_vars, "count"))),
-#       by = join_vars
-#     ) |>
-#     mutate(
-#       log_score = -log(
-#         pmax(
-#           mapply(function(d, x) density(d, at = x), count_distribution, count),
-#           .Machine$double.xmin
-#         )
-#       )
-#     )
-#   
-#   group_vars <- c(model_col, "species", if (has_region) "region")
-#   
-#   log_scores <- scored |>
-#     group_by(across(all_of(group_vars))) |>
-#     summarise(
-#       log_score = mean(log_score, na.rm = TRUE),
-#       .groups = "drop"
-#     )
-#   
-#   baseline_vars <- c("species", if (has_region) "region")
-#   
-#   baseline_log <- log_scores |>
-#     filter(.data[[model_col]] == "baseline") |>
-#     dplyr::select(all_of(c(baseline_vars, "log_score"))) |>
-#     rename(log_score_baseline = log_score)
-#   
-#   log_scores |>
-#     left_join(baseline_log, by = baseline_vars) |>
-#     mutate(
-#       log_skill = if_else(
-#         is.na(log_score_baseline) |
-#           is.nan(log_score_baseline) |
-#           log_score_baseline == 0,
-#         NA_real_,
-#         1 - log_score / log_score_baseline
-#       )
-#     )
-# }
-
-
-#' Main mvgam forecasting and evaluation function
-make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
-                                 use_ordinal = FALSE, precomputed_breaks = NULL) {
-  
-  # =========================================================================
-  # LOAD MODEL FUNCTIONS
-  # =========================================================================
-  
-  cat(glue::glue("\n  Checking {length(models_to_run)} mvgam model functions...\n"))
-  
-  for (model_name in models_to_run) {
-    fit_fn <- paste0("fit_mvgam_", model_name)
-    if (exists(fit_fn, envir = .GlobalEnv, inherits = TRUE)) {
-      cat(glue::glue("    ✓ {model_name}\n"))
+  # Keep the original naming convention without decoding labels with regex.
+  # Metadata is recovered by joining against series_map.
+  make_label <- function(df) {
+    if ("region" %in% keys) {
+      paste(df$species, df$region, sep = "_")
     } else {
-      cat(glue::glue("    ✗ {model_name} - not found (should be loaded by main.R)\n"))
+      as.character(df$species)
     }
   }
   
-  # =========================================================================
-  # DETECT SPATIAL LEVEL
-  # =========================================================================
+  train$series_id <- make_label(train)
+  test$series_id <- make_label(test)
   
-  has_region <- "region" %in% names(train_data) &&
-    length(unique(train_data$region)) > 1
-  min_year   <- min(train_data$year)
+  series_map <- dplyr::bind_rows(
+    train |> dplyr::select(series_id, all_of(keys)),
+    test |> dplyr::select(series_id, all_of(keys))
+  ) |>
+    dplyr::distinct()
   
-  cat(glue::glue(
-    "  Spatial level: {ifelse(has_region, 'subregion/colony', 'system-wide')}\n"
-  ))
+  assert_unique_rows(series_map, "series_id", "Series labels")
   
-  # =========================================================================
-  # PREPARE DATA
-  # =========================================================================
-  
-  if (has_region) {
-    all_series <- unique(c(
-      paste(train_data$species, train_data$region, sep = "_"),
-      paste(test_data$species,  test_data$region,  sep = "_")
-    ))
-    
-    train_data <- train_data |>
-      mutate(
-        time   = as.integer(year - min_year + 1),
-        series = factor(paste(species, region, sep = "_"), levels = all_series)
-      ) |>
-      as_tibble() |>
-      as.data.frame()
-    
-    test_data <- test_data |>
-      mutate(
-        time   = as.integer(year - min_year + 1),
-        series = factor(paste(species, region, sep = "_"), levels = all_series)
-      ) |>
-      as_tibble() |>
-      as.data.frame()
-    
-  } else {
-    all_series <- unique(c(train_data$species, test_data$species))
-    
-    train_data <- train_data |>
-      mutate(
-        time   = as.integer(year - min_year + 1),
-        series = factor(species, levels = all_series)
-      ) |>
-      as_tibble() |>
-      as.data.frame()
-    
-    test_data <- test_data |>
-      mutate(
-        time   = as.integer(year - min_year + 1),
-        series = factor(species, levels = all_series)
-      ) |>
-      as_tibble() |>
-      as.data.frame()
+  if (length(setdiff(test$series_id, train$series_id))) {
+    stop("Test data contains series absent from training.")
   }
   
-  train_data_original <- train_data
+  levels <- unique(train$series_id)
+  origin <- min(train$year)
   
-  cat(glue::glue("  N series: {length(all_series)}\n"))
-  
-  # =========================================================================
-  # YEAR MAPPING FOR FORECAST EXTRACTION
-  # =========================================================================
-  
-  n_test_years <- length(unique(test_data$year))
-  
-  if (has_region) {
-    test_years_by_series <- test_data |>
-      as_tibble() |>
-      mutate(series_id = paste(species, region, sep = "_")) |>
-      dplyr::select(series_id, year) |>
-      distinct() |>
-      group_by(series_id) |>
-      arrange(year) |>
-      mutate(forecast_index = row_number()) |>
-      ungroup()
-  } else {
-    test_years_by_series <- test_data |>
-      as_tibble() |>
-      dplyr::select(species, year) |>
-      distinct() |>
-      group_by(species) |>
-      arrange(year) |>
-      mutate(forecast_index = row_number()) |>
-      ungroup() |>
-      rename(series_id = species)
+  convert <- function(df) {
+    df$series <- factor(df$series_id, levels = levels)
+    df$time <- as.integer(df$year - origin + 1L)
+    df$series_id <- NULL
+    
+    df <- df |> dplyr::arrange(series, time)
+    as.data.frame(df)
   }
   
-  cat(glue::glue("  Test years: {n_test_years} per series\n"))
+  train <- convert(train)
+  test <- convert(test)
   
-  # =========================================================================
-  # FIT ALL MODELS
-  # =========================================================================
+  # Require a complete annual grid for each series; do not silently invent zeros.
+  check_grid <- function(df, label) {
+    expected <- seq.int(min(df$time), max(df$time))
+    for (s in levels) {
+      times <- df$time[as.character(df$series) == s]
+      if (!setequal(times, expected)) {
+        stop(label, " is missing annual rows for series ", s)
+      }
+    }
+  }
   
-  cat(glue::glue("\n  Fitting {length(models_to_run)} mvgam models...\n"))
+  check_grid(train, "Training data")
+  check_grid(test, "Test data")
   
-  results <- list()
+  list(
+    train = train,
+    test = test,
+    keys = keys,
+    series_map = series_map
+  )
+}
+
+extract_mvgam_predictions <- function(fc, model_name, prepared) {
+  summary_df <- tibble::as_tibble(summary(fc))
   
-  for (model_name in models_to_run) {
-    cat(glue::glue("    • {model_name}"))
+  required <- c("series", "time", "predQ50", "predQ2.5", "predQ97.5")
+  missing <- setdiff(required, names(summary_df))
+  
+  if (length(missing)) {
+    stop(
+      "Unexpected mvgam summary columns: missing ",
+      paste(missing, collapse = ", "),
+      ". Inspect names(summary(fc)) for your installed version."
+    )
+  }
+  
+  test <- prepared$test
+  series_map <- prepared$series_map
+  
+  rows <- lapply(series_map$series_id, function(s) {
+    part <- summary_df |>
+      dplyr::filter(as.character(series) == s) |>
+      dplyr::arrange(time)
     
-    fit_fn <- paste0("fit_mvgam_", model_name)
+    expected <- test |>
+      tibble::as_tibble() |>
+      dplyr::filter(as.character(series) == s) |>
+      dplyr::arrange(time)
     
-    if (!exists(fit_fn, envir = .GlobalEnv, inherits = TRUE)) {
-      cat(" ✗ (not found)\n")
+    absolute_times <- expected$time
+    relative_times <- seq_len(nrow(expected))
+    summary_times <- as.integer(part$time)
+    
+    # Accept either absolute model times or forecast-relative times.
+    # Do not use slice(1:n) on a summary that may include fitted values.
+    if (all(absolute_times %in% summary_times)) {
+      selected <- match(absolute_times, summary_times)
+    } else if (
+      nrow(part) == nrow(expected) &&
+      setequal(summary_times, relative_times)
+    ) {
+      selected <- match(relative_times, summary_times)
+    } else {
+      stop("Cannot reliably map forecast times to years for series ", s)
+    }
+    
+    if (anyDuplicated(summary_times)) {
+      stop("Duplicate summary times for series ", s)
+    }
+    
+    part <- part[selected, , drop = FALSE]
+    
+    out <- tibble(
+      series = s,
+      time = absolute_times,
+      year = expected$year,
+      model = model_name,
+      Estimate = part$predQ50,
+      Q2.5 = part$predQ2.5,
+      Q97.5 = part$predQ97.5
+    )
+    
+    # Preserve genuine quantiles when supplied by mvgam.
+    # Never approximate an 80% interval from a 95% interval here.
+    for (q in c("10", "25", "75", "90")) {
+      source <- paste0("predQ", q)
+      if (source %in% names(part)) {
+        out[[paste0("Q", q)]] <- part[[source]]
+      }
+    }
+    
+    out
+  })
+  
+  dplyr::bind_rows(rows) |>
+    dplyr::left_join(series_map, by = c("series" = "series_id"))
+}
+
+# =============================================================================
+# MVGAM FORECASTING AND METRICS
+# =============================================================================
+
+make_mvgam_forecasts <- function(train_data,
+                                 test_data,
+                                 models_to_run,
+                                 use_ordinal = FALSE,
+                                 precomputed_breaks = NULL,
+                                 config = get_evaluation_config()) {
+  prepared <- prepare_mvgam_data(train_data, test_data)
+  keys <- prepared$keys
+  group_vars <- c("model", keys)
+  
+  objects <- list()
+  prediction_parts <- list()
+  crps_parts <- list()
+  
+  for (model_name in unique(models_to_run)) {
+    function_name <- paste0("fit_mvgam_", model_name)
+    
+    if (!exists(function_name, mode = "function", inherits = TRUE)) {
+      warning("Model function not found: ", function_name, call. = FALSE)
       next
     }
     
-    result <- tryCatch({
-      get(fit_fn, envir = .GlobalEnv)(train_data, test_data, CONFIG)
-    }, error = function(e) {
-      cat(" ✗\n")
-      warning(glue::glue("    {model_name} failed: {e$message}"))
-      NULL
-    })
+    fit_function <- get(function_name, mode = "function", inherits = TRUE)
     
-    if (!is.null(result)) {
-      results[[model_name]] <- result
-      cat(" ✓\n")
-    }
-  }
-  
-  # =========================================================================
-  # EXTRACT AND FORMAT ALL FORECASTS
-  # =========================================================================
-  
-  if (length(results) == 0) {
-    warning("All mvgam models failed")
-    return(list(predictions = tibble(), metrics = tibble()))
-  }
-  
-  cat("\n  Extracting forecasts...\n")
-  
-  all_preds <- bind_rows(lapply(names(results), function(model_name) {
-    result <- results[[model_name]]
-    if (is.null(result$fc)) return(tibble())
+    cat("\nFitting mvgam model:", model_name, "\n")
     
-    fc_summary <- summary(result$fc)
-    
-    fc_only <- fc_summary |>
-      as_tibble() |>
-      group_by(series) |>
-      slice(1:n_test_years) |>
-      ungroup()
-    
-    fc_out <- fc_only |>
-      rename(
-        Estimate = predQ50,
-        Q2.5     = predQ2.5,
-        Q97.5    = predQ97.5
-      ) |>
-      mutate(
-        series_id      = as.character(series),
-        forecast_index = time
-      ) |>
-      left_join(test_years_by_series, by = c("series_id", "forecast_index"))
-    
-    if (has_region) {
-      fc_out <- fc_out |>
-        mutate(
-          species = sub("_[^_]+$", "", series_id),
-          region  = sub(".*_",     "", series_id)
+    result <- tryCatch(
+      fit_function(prepared$train, prepared$test, config),
+      error = function(e) {
+        warning(
+          model_name, " failed: ", conditionMessage(e), call. = FALSE
         )
-    } else {
-      fc_out <- fc_out |>
-        mutate(species = series_id) |>
-        dplyr::select(-any_of("region"))
+        NULL
+      }
+    )
+    
+    if (is.null(result) || is.null(result$fc)) next
+    
+    # Preserve the existing raw object, even if summary extraction fails.
+    objects[[model_name]] <- result$fc
+    
+    prediction_parts[[model_name]] <- tryCatch(
+      extract_mvgam_predictions(result$fc, model_name, prepared),
+      error = function(e) {
+        warning(
+          "Prediction extraction failed for ", model_name, ": ",
+          conditionMessage(e), call. = FALSE
+        )
+        tibble()
+      }
+    )
+    
+    crps_parts[[model_name]] <- tryCatch({
+      scores <- result$crps
+      
+      if (is.null(scores) || !nrow(scores)) {
+        scores <- extract_crps_mvgam(result$fc, model_name)
+      }
+      
+      scores |>
+        tibble::as_tibble() |>
+        dplyr::mutate(
+          series = as.character(series),
+          model = model_name
+        ) |>
+        dplyr::left_join(
+          prepared$series_map,
+          by = c("series" = "series_id")
+        )
+    }, error = function(e) {
+      warning(
+        "CRPS extraction failed for ", model_name, ": ",
+        conditionMessage(e), call. = FALSE
+      )
+      tibble()
+    })
+  }
+  
+  predictions <- dplyr::bind_rows(prediction_parts)
+  crps_rows <- dplyr::bind_rows(crps_parts)
+  
+  if (!length(objects)) {
+    warning("All mvgam models failed.", call. = FALSE)
+    return(empty_window_result())
+  }
+  
+  crps_metrics <- tibble()
+  
+  if (nrow(crps_rows)) {
+    if (anyNA(crps_rows[keys])) {
+      stop("CRPS series labels do not match the prepared series map.")
     }
     
-    fc_out |>
-      mutate(model = model_name) |>
-      dplyr::select(Estimate, Q2.5, Q97.5, species, any_of("region"), year, model)
-  }))
-  
-  # Approximate each mvgam predictive distribution as Normal using its
-  # central 95% interval.
-  # log_forecasts <- all_preds |>
-  #   mutate(
-  #     pred_sd = pmax((Q97.5 - Q2.5) / (2 * 1.96), 0.1),
-  #     count_distribution = distributional::dist_normal(
-  #       mu    = Estimate,
-  #       sigma = pred_sd
-  #     )
-  #   )
-  
-  all_crps <- bind_rows(lapply(results, function(x) x$crps))
-  
-  expected_n <- length(results) * length(all_series) * n_test_years
-  cat(glue::glue("  ✓ Extracted {nrow(all_preds)} predictions\n"))
-  cat(glue::glue("  Expected:  {expected_n}\n"))
-  
-  na_count <- sum(is.na(all_preds$year))
-  if (na_count > 0) {
-    warning(glue::glue("{na_count} predictions have NA years"))
-  } else {
-    cat("  ✓ All forecasts have valid years\n")
+    crps_metrics <- crps_rows |>
+      dplyr::group_by(across(all_of(group_vars))) |>
+      dplyr::summarise(
+        crps = finite_mean(score),
+        n_forecasts = sum(is.finite(score)),
+        .groups = "drop"
+      ) |>
+      add_baseline_skill("model", keys, "crps")
   }
   
-  if (nrow(all_crps) == 0) {
-    return(list(predictions = all_preds, metrics = tibble()))
+  rmse_metrics <- tibble()
+  
+  if (nrow(predictions)) {
+    obs_keys <- c(keys, "year")
+    
+    rmse_metrics <- predictions |>
+      dplyr::left_join(
+        tibble::as_tibble(test_data) |>
+          dplyr::select(all_of(c(obs_keys, "count"))),
+        by = obs_keys
+      ) |>
+      dplyr::group_by(across(all_of(group_vars))) |>
+      dplyr::summarise(
+        rmse = sqrt(finite_mean((Estimate - count)^2)),
+        n_rmse = sum(is.finite(Estimate) & is.finite(count)),
+        .groups = "drop"
+      ) |>
+      add_baseline_skill("model", keys, "rmse")
   }
   
-  # =========================================================================
-  # DECODE CRPS SERIES LABELS
-  # =========================================================================
-  
-  if (has_region) {
-    all_crps <- all_crps |>
-      mutate(
-        species = sub("_[^_]+$", "", series),
-        region  = sub(".*_",     "", series)
-      )
-  } else {
-    all_crps <- all_crps |>
-      mutate(species = series) |>
-      dplyr::select(-any_of("region"))
-  }
-  
-  # =========================================================================
-  # CRPS SKILL SCORES
-  # =========================================================================
-  
-  has_region_crps <- has_region && "region" %in% names(all_crps)
-  group_vars      <- if (has_region_crps) c("model", "species", "region") else c("model", "species")
-  baseline_vars   <- if (has_region_crps) c("species", "region")           else "species"
-  
-  baseline_summary <- all_crps |>
-    filter(model == "baseline") |>
-    group_by(across(all_of(baseline_vars))) |>
-    summarize(crps_baseline = mean(score, na.rm = TRUE), .groups = "drop")
-  
-  skills <- all_crps |>
-    left_join(baseline_summary, by = baseline_vars) |>
-    group_by(across(all_of(group_vars))) |>
-    summarize(
-      crps          = mean(score, na.rm = TRUE),
-      crps_baseline = first(crps_baseline),
-      crps_skill    = if_else(
-        is.na(crps_baseline) | is.nan(crps_baseline) | crps_baseline == 0,
-        NA_real_,
-        1 - (crps / crps_baseline)
-      ),
-      n_forecasts = n(),
-      .groups = "drop"
+  if (nrow(crps_metrics) && nrow(rmse_metrics)) {
+    metrics <- dplyr::full_join(
+      crps_metrics, rmse_metrics, by = group_vars
     )
+  } else if (nrow(crps_metrics)) {
+    metrics <- crps_metrics
+  } else {
+    metrics <- rmse_metrics
+  }
   
-  # =========================================================================
-  # RMSE SKILL SCORES (mvgam)
-  # =========================================================================
-  # Note: RMSE skill for mvgam uses the median as the point 
-  # estimate, while fable uses the mean
+  # Preserve expected metric columns even when scoring fails.
+  if (nrow(metrics)) {
+    for (col in c(
+      "crps", "crps_baseline", "crps_skill",
+      "rmse", "rmse_baseline", "rmse_skill"
+    )) {
+      if (!col %in% names(metrics)) metrics[[col]] <- NA_real_
+    }
+  }
   
-  # keeping this here for now... 
-  # rmse_raw <- all_preds |>
-  #   left_join(
-  #     test_data |>
-  #       as_tibble() |>
-  #       dplyr::select(species, any_of("region"), year, count),
-  #     by = c("species", any_of("region"), "year")
-  #   ) |>
-  #   group_by(across(all_of(group_vars))) |>
-  #   summarise(
-  #     rmse = sqrt(mean((Estimate - count)^2, na.rm = TRUE)),
-  #     .groups = "drop"
-  #   )
+  if (isTRUE(use_ordinal) && nrow(predictions)) {
+    rps_metrics <- tryCatch(
+      calculate_rps_mvgam(
+        predictions, test_data, train_data, config, precomputed_breaks
+      ),
+      error = function(e) {
+        warning("mvgam RPS failed: ", conditionMessage(e), call. = FALSE)
+        tibble()
+      }
+    )
+    
+    if (nrow(rps_metrics)) {
+      if (nrow(metrics)) {
+        metrics <- dplyr::full_join(
+          metrics, rps_metrics, by = group_vars
+        )
+      } else {
+        metrics <- rps_metrics
+      }
+    }
+  }
   
-  rmse_join_vars <- c(
-    "species",
-    if (has_region_crps) "region",
-    "year"
+  list(
+    predictions = predictions,
+    metrics = metrics,
+    fc_objects = objects
+  )
+}
+
+# =============================================================================
+# ORDINAL THRESHOLDS AND RPS
+# =============================================================================
+
+filter_ordinal_years <- function(df, ordinal_years = "All") {
+  if (is.null(ordinal_years) ||
+      tolower(as.character(ordinal_years)) == "all") {
+    return(df)
+  }
+  
+  years <- suppressWarnings(as.numeric(ordinal_years))
+  years <- positive_integer(years, "ordinal_years")
+  
+  df |>
+    dplyr::filter(year >= max(year, na.rm = TRUE) - years + 1L)
+}
+
+fix_zero_breaks <- function(quantiles_df) {
+  # Preserve valid quantiles.
+  # Resolve repeated finite thresholds using a small numerical increment.
+  # Missing thresholds remain NA rather than being invented.
+  out <- tibble::as_tibble(quantiles_df)
+  
+  if (!nrow(out)) return(out)
+  
+  for (i in seq_len(nrow(out))) {
+    values <- as.numeric(out[i, c("low", "medium", "high")])
+    
+    if (!all(is.finite(values))) next
+    
+    values <- sort(values)
+    eps <- 1e-8 * max(1, abs(values))
+    
+    for (j in 2:3) {
+      if (values[j] <= values[j - 1L]) {
+        values[j] <- values[j - 1L] + eps
+      }
+    }
+    
+    out$low[i] <- values[1]
+    out$medium[i] <- values[2]
+    out$high[i] <- values[3]
+  }
+  
+  out
+}
+
+ordinal_thresholds <- function(train_data, config,
+                               precomputed_breaks = NULL) {
+  if (!is.null(precomputed_breaks)) {
+    return(fix_zero_breaks(precomputed_breaks))
+  }
+  
+  probs <- unlist(config$ordinal_breaks %||% c(0.33, 0.50, 0.67))
+  
+  if (length(probs) != 3L || any(!is.finite(probs)) ||
+      any(probs <= 0 | probs >= 1) || any(diff(probs) <= 0)) {
+    stop("ordinal_breaks must contain three increasing probabilities.")
+  }
+  
+  keys <- evaluation_keys(train_data)
+  
+  q <- function(x, p) {
+    x <- x[is.finite(x)]
+    if (length(x)) {
+      as.numeric(stats::quantile(x, p, names = FALSE))
+    } else {
+      NA_real_
+    }
+  }
+  
+  train_data |>
+    tibble::as_tibble() |>
+    filter_ordinal_years(config$ordinal_years %||% "All") |>
+    dplyr::group_by(across(all_of(keys))) |>
+    dplyr::summarise(
+      low = q(count, probs[1]),
+      medium = q(count, probs[2]),
+      high = q(count, probs[3]),
+      .groups = "drop"
+    ) |>
+    fix_zero_breaks()
+}
+
+join_ordinal_data <- function(predictions, test_data, thresholds) {
+  keys <- evaluation_keys(test_data)
+  threshold_keys <- intersect(keys, names(thresholds))
+  
+  if (!"species" %in% threshold_keys) {
+    stop("Ordinal thresholds must identify species.")
+  }
+  
+  assert_unique_rows(thresholds, threshold_keys, "Ordinal thresholds")
+  
+  obs_keys <- c(keys, "year")
+  observations <- tibble::as_tibble(test_data) |>
+    dplyr::select(all_of(c(obs_keys, "count"))) |>
+    dplyr::rename(observed_count = count)
+  
+  assert_unique_rows(observations, obs_keys, "Ordinal observations")
+  
+  predictions |>
+    tibble::as_tibble() |>
+    dplyr::left_join(thresholds, by = threshold_keys) |>
+    dplyr::left_join(observations, by = obs_keys)
+}
+
+aggregate_rps <- function(df, model_col, keys) {
+  # RPS = sum of squared cumulative-probability errors.
+  # Category convention: (-Inf, low], (low, medium], etc.
+  # Observations and predictions are matched explicitly by year and series.
+  row_score <- (df$cdf_low - (df$observed_count <= df$low))^2 +
+    (df$cdf_medium - (df$observed_count <= df$medium))^2 +
+    (df$cdf_high - (df$observed_count <= df$high))^2
+  
+  invalid <- !is.finite(df$observed_count) |
+    !is.finite(df$low) |
+    !is.finite(df$medium) |
+    !is.finite(df$high)
+  
+  row_score[invalid] <- NA_real_
+  df$rps_row <- row_score
+  
+  df |>
+    dplyr::group_by(across(all_of(c(model_col, keys)))) |>
+    dplyr::summarise(
+      rps = finite_mean(rps_row),
+      n_rps = sum(is.finite(rps_row)),
+      .groups = "drop"
+    ) |>
+    add_baseline_skill(model_col, keys, "rps")
+}
+
+calculate_rps_mvgam <- function(predictions, test_data, train_data, config,
+                                precomputed_breaks = NULL) {
+  # APPROXIMATION retained from the original implementation.
+  # For skewed count forecasts, use posterior-draw category probabilities
+  # in a subsequent revision rather than treating this as exact RPS.
+  thresholds <- ordinal_thresholds(
+    train_data, config, precomputed_breaks
   )
   
-  rmse_raw <- all_preds |>
-    left_join(
-      test_data |>
-        as_tibble() |>
-        dplyr::select(all_of(c(rmse_join_vars, "count"))),
-      by = rmse_join_vars
-    ) |>
-    group_by(across(all_of(group_vars))) |>
-    summarise(
-      rmse = sqrt(mean((Estimate - count)^2, na.rm = TRUE)),
-      .groups = "drop"
-    )
+  df <- join_ordinal_data(predictions, test_data, thresholds)
   
-  baseline_rmse <- rmse_raw |>
-    filter(model == "baseline") |>
-    dplyr::select(all_of(c(baseline_vars, "rmse"))) |>
-    rename(rmse_baseline = rmse)
+  pred_sd <- pmax((df$Q97.5 - df$Q2.5) / (2 * 1.96), 0.1)
   
-  rmse_scores <- rmse_raw |>
-    left_join(baseline_rmse, by = baseline_vars) |>
-    mutate(
-      rmse_skill = if_else(
-        is.na(rmse_baseline) | is.nan(rmse_baseline) | rmse_baseline == 0,
-        NA_real_,
-        1 - rmse / rmse_baseline
-      )
-    )
+  df$cdf_low <- stats::pnorm(df$low, df$Estimate, pred_sd)
+  df$cdf_medium <- stats::pnorm(df$medium, df$Estimate, pred_sd)
+  df$cdf_high <- stats::pnorm(df$high, df$Estimate, pred_sd)
   
-  skills <- skills |>
-    left_join(
-      rmse_scores |> dplyr::select(all_of(c(group_vars, "rmse", "rmse_skill"))),
-      by = group_vars
-    )
-  
-  # =========================================================================
-  # LOG SCORE SKILL
-  # =========================================================================
-  
-  # log_scores <- calculate_log_score(
-  #   forecasts    = log_forecasts,
-  #   observations = test_data,
-  #   model_col    = "model",
-  #   has_region   = has_region_crps
-  # )
-  # 
-  # log_join_vars <- if (has_region_crps) {
-  #   c("model", "species", "region")
-  # } else {
-  #   c("model", "species")
-  # }
-  # 
-  # skills <- skills |>
-  #   left_join(
-  #     log_scores |>
-  #       dplyr::select(all_of(c(log_join_vars, "log_score", "log_skill"))),
-  #     by = log_join_vars
-  #   )
-  
-  # =========================================================================
-  # RPS
-  # =========================================================================
-  
-  if (use_ordinal) {
-    cat("\n  Adding ordinal evaluation (RPS)...\n")
-    rps_scores <- tryCatch({
-      calculate_rps_mvgam(
-        all_preds, test_data, train_data_original, CONFIG, precomputed_breaks
-      )
-    }, error = function(e) {
-      warning(glue::glue("RPS failed: {e$message}"))
-      NULL
-    })
-    
-    if (!is.null(rps_scores)) {
-      rps_join_vars <- if (has_region_crps) c("model", "species", "region") else c("model", "species")
-      rps_select    <- c(rps_join_vars, "rps", "rps_skill")
-      skills <- skills |>
-        left_join(
-          rps_scores |> dplyr::select(all_of(rps_select)),
-          by = rps_join_vars
-        )
-    }
-  }
-  
-  cat("\n")
-  return(list(predictions = all_preds, metrics = skills))
+  aggregate_rps(df, "model", evaluation_keys(test_data))
 }
 
-# =============================================================================
-# FABLE EVALUATION - SKILL SCORES + RPS
-# =============================================================================
-#' Calculate RPS for fable predictions
 calculate_rps_fable <- function(forecasts, test_data, train_data, config,
                                 precomputed_breaks = NULL) {
+  thresholds <- ordinal_thresholds(
+    train_data, config, precomputed_breaks
+  )
   
-  has_region <- "region" %in% names(as_tibble(test_data)) &&
-    length(unique(as_tibble(test_data)$region)) > 1
+  df <- join_ordinal_data(forecasts, test_data, thresholds)
   
-  group_vars <- if (has_region) c("species", "region") else "species"
-  
-  if (!is.null(precomputed_breaks)) {
-    quantiles_by_group <- precomputed_breaks
-  } else {
-    quantiles_by_group <- train_data |>
-      as_tibble() |>
-      filter_ordinal_years(config$ordinal_years) |>
-      group_by(across(all_of(group_vars))) |>
-      summarise(
-        low    = quantile(count, config$ordinal_breaks[1], na.rm = TRUE),
-        medium = quantile(count, config$ordinal_breaks[2], na.rm = TRUE),
-        high   = quantile(count, config$ordinal_breaks[3], na.rm = TRUE),
-        .groups = "drop"
-      ) |>
-      fix_zero_breaks()  # FIX: prevent NA categories when training data is all zeros
+  # Evaluate the actual forecast distribution, not a Normal approximation.
+  cdf_at <- function(distributions, thresholds) {
+    vapply(seq_along(thresholds), function(i) {
+      if (!is.finite(thresholds[i])) return(NA_real_)
+      value <- distributional::cdf(
+        distributions[i], thresholds[i]
+      )
+      as.numeric(unlist(value))[1]
+    }, numeric(1))
   }
   
-  # Forecast probabilities
-  forecasts_probs <- forecasts |>
-    as_tibble() |>
-    left_join(quantiles_by_group, by = group_vars) |>
-    rowwise() |>
-    mutate(
-      pred_sd        = sqrt(distributional::variance(count)),
-      prob_low       = pnorm(low,    mean = .mean, sd = pred_sd),
-      prob_medium    = pnorm(medium, mean = .mean, sd = pred_sd) - prob_low,
-      prob_high      = pnorm(high,   mean = .mean, sd = pred_sd) -
-        pnorm(medium, mean = .mean, sd = pred_sd),
-      prob_very_high = 1 - pnorm(high, mean = .mean, sd = pred_sd)
-    ) |>
-    ungroup()
+  df$cdf_low <- cdf_at(df$count, df$low)
+  df$cdf_medium <- cdf_at(df$count, df$medium)
+  df$cdf_high <- cdf_at(df$count, df$high)
   
-  # Ordinal observations
-  test_data_ordinal <- test_data |>
-    as_tibble() |>
-    left_join(quantiles_by_group, by = group_vars) |>
-    rowwise() |>
-    mutate(
-      count_category = cut(
-        count,
-        breaks = c(-Inf, low, medium, high, Inf),
-        labels = c("Low", "Medium", "High", "Very High"),
-        ordered = TRUE
-      )
-    ) |>
-    ungroup()
-  
-  rps_group_vars <- c(".model", group_vars)
-  
-  rps_by_model <- forecasts_probs |>
-    group_by(across(all_of(rps_group_vars))) |>
-    summarise(
-      rps = {
-        cur_species <- unique(species)
-        
-        obs_filtered <- if (has_region) {
-          cur_region <- unique(region)
-          test_data_ordinal |>
-            filter(species == cur_species, region == cur_region)
-        } else {
-          test_data_ordinal |>
-            filter(species == cur_species)
-        }
-        
-        obs_cat  <- obs_filtered |> pull(count_category) |> as.numeric()
-        prob_mat <- pick(prob_low, prob_medium, prob_high, prob_very_high) |>
-          base::as.matrix()
-        
-        mean(rps(obs_cat, prob_mat)$rps, na.rm = TRUE)
-      },
-      .groups = "drop"
-    )
-  
-  # Skill scores
-  baseline_rps <- rps_by_model |>
-    filter(.model == "baseline") |>
-    dplyr::select(all_of(c(group_vars, "rps"))) |>
-    rename(rps_baseline = rps)
-  
-  rps_by_model |>
-    left_join(baseline_rps, by = group_vars) |>
-    mutate(
-      rps_skill = if_else(
-        is.na(rps_baseline) | is.nan(rps_baseline) | rps_baseline == 0,
-        NA_real_,
-        1 - rps / rps_baseline
-      )
-    )
+  aggregate_rps(df, ".model", evaluation_keys(test_data))
 }
 
-#' Compute skill scores from raw fable accuracy metrics
-make_fable_evaluation <- function(raw_metrics, forecasts, test_data,
-                                  train_data, config, precomputed_breaks,
-                                  use_ordinal) {
+# =============================================================================
+# FABLE METRICS
+# =============================================================================
+
+make_fable_evaluation <- function(raw_metrics,
+                                  forecasts,
+                                  test_data,
+                                  train_data,
+                                  config,
+                                  precomputed_breaks = NULL,
+                                  use_ordinal = FALSE) {
+  if (is.null(raw_metrics) || !nrow(raw_metrics)) return(tibble())
   
-  has_region <- "region" %in% names(as_tibble(test_data)) &&
-    length(unique(as_tibble(test_data)$region)) > 1
+  metrics <- tibble::as_tibble(raw_metrics)
+  required <- c(".model", "species", "crps", "rmse")
   
-  key_cols  <- if (has_region) c("species", "region") else "species"
-  join_cols <- c(intersect(key_cols, names(raw_metrics)), ".type")
-  
-  # =========================================================================
-  # CRPS AND RMSE SKILL SCORES
-  # =========================================================================
-  
-  baselines <- raw_metrics |> filter(.model == "baseline")
-  
-  if (nrow(baselines) == 0) {
-    warning("No fable baseline found - returning raw metrics")
-    return(raw_metrics)
+  if (!all(required %in% names(metrics))) {
+    stop(
+      "Fable metrics are missing: ",
+      paste(setdiff(required, names(metrics)), collapse = ", ")
+    )
   }
   
-  metrics <- raw_metrics |>
-    left_join(baselines, by = join_cols, suffix = c("", "_baseline")) |>
-    mutate(
-      crps_skill = if_else(
-        is.na(crps_baseline) | is.nan(crps_baseline) | crps_baseline == 0,
-        NA_real_,
-        1 - crps / crps_baseline
-      ),
-      rmse_skill = if_else(
-        is.na(rmse_baseline) | is.nan(rmse_baseline) | rmse_baseline == 0,
-        NA_real_,
-        1 - rmse / rmse_baseline
-      )
-    ) |>
-    dplyr::select(-.model_baseline)
-  # =========================================================================
-  # LOG SCORE SKILL
-  # =========================================================================
+  keys <- intersect(evaluation_keys(test_data), names(metrics))
+  baseline_keys <- c(keys, intersect(".type", names(metrics)))
   
-  # log_forecasts <- forecasts |>
-  #   as_tibble() |>
-  #   mutate(
-  #     count_distribution = count,
-  #     model = .model
-  #   )
-  # 
-  # log_scores <- calculate_log_score(
-  #   forecasts    = log_forecasts,
-  #   observations = test_data,
-  #   model_col    = "model",
-  #   has_region   = has_region
-  # ) |>
-  #   rename(.model = model)
-  # 
-  # log_join_vars <- c(
-  #   ".model",
-  #   if (has_region) c("species", "region") else "species"
-  # )
-  # 
-  # metrics <- metrics |>
-  #   left_join(
-  #     log_scores |>
-  #       dplyr::select(all_of(c(log_join_vars, "log_score", "log_skill"))),
-  #     by = log_join_vars
-  #   )
+  assert_unique_rows(
+    metrics, c(".model", baseline_keys), "Fable accuracy metrics"
+  )
   
-  # =========================================================================
-  # RPS
-  # =========================================================================
+  metrics <- metrics |>
+    add_baseline_skill(".model", baseline_keys, "crps") |>
+    add_baseline_skill(".model", baseline_keys, "rmse")
+  
+  # Missing baselines yield NA skills without dropping raw scores.
+  if (!any(metrics$.model == "baseline")) {
+    warning("No fable baseline; skill scores are NA.", call. = FALSE)
+  }
   
   if (isTRUE(use_ordinal)) {
-    rps_metrics <- tryCatch({
+    rps_metrics <- tryCatch(
       calculate_rps_fable(
-        forecasts, test_data, train_data,
-        config             = config,
-        precomputed_breaks = precomputed_breaks
-      )
-    }, error = function(e) {
-      warning(glue::glue("Fable RPS failed: {e$message}"))
-      NULL
-    })
-    
-    if (!is.null(rps_metrics) && nrow(rps_metrics) > 0) {
-      rps_join <- intersect(
-        c(".model", "species", "region"),
-        intersect(names(metrics), names(rps_metrics))
-      )
-      metrics <- metrics |>
-        left_join(
-          rps_metrics |>
-            dplyr::select(all_of(c(rps_join, "rps", "rps_skill"))),
-          by = rps_join
-        )
-    }
-  }
-  
-  return(metrics)
-}
-
-# =============================================================================
-# UTILITY FUNCTIONS
-# =============================================================================
-#' Replace zero or NA ordinal breaks with a small epsilon so cut() works
-#' when training data is all zeros (e.g., sparse early CV windows).
-#' The epsilon ladder keeps thresholds strictly ordered.
-fix_zero_breaks <- function(quantiles_df) {
-  eps <- 0.5  # half a count — below any real positive observation
-  quantiles_df |>
-    mutate(
-      low    = if_else(is.na(low)    | low    == 0, eps,       low),
-      medium = if_else(is.na(medium) | medium == 0, eps * 2,   medium),
-      high   = if_else(is.na(high)   | high   == 0, eps * 3,   high)
+        forecasts, test_data, train_data, config, precomputed_breaks
+      ),
+      error = function(e) {
+        warning("Fable RPS failed: ", conditionMessage(e), call. = FALSE)
+        tibble()
+      }
     )
-}
-
-#' Filter data to recent years for ordinal break calculation
-filter_ordinal_years <- function(df, ordinal_years) {
-  if (!identical(ordinal_years, "All")) {
-    n_years <- as.integer(ordinal_years)
-    df <- df |>
-      filter(year >= max(year, na.rm = TRUE) - n_years + 1)
+    
+    if (nrow(rps_metrics)) {
+      metrics <- dplyr::left_join(
+        metrics,
+        rps_metrics,
+        by = c(".model", keys)
+      )
+    }
   }
-  df
+  
+  metrics
 }
 
-#' Print cross-validation summary
+# =============================================================================
+# SUMMARY
+# =============================================================================
+
 print_cv_summary <- function(cv_results) {
-  cat("\n=== Cross-Validation Summary ===\n")
+  cat("\n=== Cross-validation summary ===\n")
   
-  if (!is.null(cv_results$cv_info)) {
-    cat(glue::glue("Windows:     {cv_results$cv_info$n_windows}\n"))
-    cat(glue::glue("Train years: {cv_results$cv_info$train_years}\n"))
-    cat(glue::glue("Test years:  {cv_results$cv_info$test_years}\n\n"))
+  info <- cv_results$cv_info
+  
+  if (!is.null(info)) {
+    cat("Windows:", info$n_windows, "\n")
+    cat("Training years:", info$train_years, "\n")
+    cat("Test years:", info$test_years, "\n")
   }
   
-  if (!is.null(cv_results$metrics) && nrow(cv_results$metrics) > 0) {
-    cat("=== Model Performance ===\n")
-    
-    metrics <- cv_results$metrics
-    
-    # Handle both mvgam ("model") and fable (".model")
-    if ("model" %in% names(metrics)) {
-      model_col <- "model"
-    } else if (".model" %in% names(metrics)) {
-      model_col <- ".model"
-    } else {
-      cat("No model column found\n")
-      return(invisible(NULL))
-    }
-    
-    if (!"crps" %in% names(metrics)) {
-      cat("No CRPS column found\n")
-      return(invisible(NULL))
-    }
-    
-    summary_by_model <- metrics |>
-      group_by(.data[[model_col]]) |>
-      summarise(
-        mean_crps   = mean(crps, na.rm = TRUE),
-        mean_skill  = mean(crps_skill, na.rm = TRUE),
-        n_forecasts = if ("n_forecasts" %in% names(metrics)) {
-          sum(n_forecasts, na.rm = TRUE)
-        } else {
-          n()
-        },
-        .groups = "drop"
-      ) |>
-      arrange(mean_crps)
-    
-    print(summary_by_model, n = Inf)
+  metrics <- cv_results$metrics
+  
+  if (is.null(metrics) || !nrow(metrics)) {
+    cat("No metrics available.\n")
+    return(invisible(NULL))
   }
   
-  cat("\n")
+  model_col <- if ("model" %in% names(metrics)) {
+    "model"
+  } else if (".model" %in% names(metrics)) {
+    ".model"
+  } else {
+    cat("No model column available.\n")
+    return(invisible(NULL))
+  }
+  
+  if (!"crps" %in% names(metrics)) {
+    cat("No CRPS scores available.\n")
+    return(invisible(NULL))
+  }
+  
+  if (!"crps_skill" %in% names(metrics)) {
+    metrics$crps_skill <- NA_real_
+  }
+  
+  if (!"n_forecasts" %in% names(metrics)) {
+    metrics$n_forecasts <- NA_integer_
+  }
+  
+  summary_table <- metrics |>
+    dplyr::group_by(.data[[model_col]]) |>
+    dplyr::summarise(
+      mean_crps = finite_mean(crps),
+      mean_skill = finite_mean(crps_skill),
+      n_forecasts = if (all(is.na(n_forecasts))) {
+        NA_integer_
+      } else {
+        sum(n_forecasts, na.rm = TRUE)
+      },
+      .groups = "drop"
+    ) |>
+    dplyr::arrange(mean_crps)
+  
+  print(summary_table, n = Inf)
+  invisible(summary_table)
 }
 
 cat("✓ evaluation.R loaded\n")

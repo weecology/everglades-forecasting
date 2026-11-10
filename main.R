@@ -1,658 +1,870 @@
 # =============================================================================
 # MAIN.R - Wading Bird Forecasting Pipeline
-# Optimized for parallel processing and organized output folders
 #
+# Requires the rewritten evaluation.R containing:
+#   fit_sliding_window()
+#   make_mvgam_forecasts()
+#   ordinal_thresholds()
+#   positive_integer()
+#
+# Preserves:
+#   results$<framework>$forecasts
+#   results$<framework>$metrics
+#   results$<framework>$window_objects
+#
+# Separate regional runs are retained under:
+#   results$by_region[[region]]
+#
+# Native mvgam plots:
+#   forecasts_native/<region>/<window>/<model>/series_*.png
+#
+# Intended usage:
+#   Rscript main.R
+# or:
+#   source("main.R") from run_all_scales.R
 # =============================================================================
 
-
-# =============================================================================
-
-# HiPerGator-specific fix for module conflicts
-if (dir.exists("/apps")) {
-  # Manually load UDUNITS without needing the module 'loaded' in the shell
-  if (file.exists("/apps/udunits/2.2.17/lib/libudunits2.so.0")) {
-    dyn.load("/apps/udunits/2.2.17/lib/libudunits2.so.0")
+run_forecasting_pipeline <- function() {
+  start_time <- Sys.time()
+  
+  `%||%` <- function(x, y) if (is.null(x)) y else x
+  
+  banner <- function(text) {
+    border <- paste(rep("=",  seventy <- 70L), collapse = "")
+    cat("\n", border, "\n", text, "\n", border, "\n", sep = "")
   }
   
-  # Manually load GDAL to bypass the Lmod conflict with R/4.6
-  # libgdal.so.30 is typically found in this path on HiPerGator
-  gdal_path <- "/apps/gcc/12.2.0/gdal/3.9.0/lib/libgdal.so"
-  if (file.exists(gdal_path)) {
-    dyn.load(gdal_path)
-  }
-}
-
-# Load the personal library path defined in your setup [2]
-# .libPaths("~/R/libs")
-library('units')
-library('sf')
-library('stars')
-
-# =============================================================================
-
-
-start_time <- Sys.time()
-
-# =============================================================================
-# UTILITY FUNCTIONS
-# =============================================================================
-
-`%||%` <- function(x, y) if (is.null(x)) y else x
-
-print_banner <- function(text, char = "=", width = 80) {
-  border <- paste(rep(char, width), collapse = "")
-  cat("\n", border, "\n", text, "\n", border, "\n", sep = "")
-}
-
-print_section <- function(text, char = "-") {
-  cat("\n", paste(rep(char, 60), collapse = ""), "\n", sep = "")
-  cat(text, "\n")
-  cat(paste(rep(char, 60), collapse = ""), "\n\n", sep = "")
-}
-
-# =============================================================================
-# LIBRARY LOADING
-# =============================================================================
-print_banner("WADING BIRD FORECASTING PIPELINE")
-cat("Starting at:", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "\n")
-
-suppressPackageStartupMessages({
-  library(distributional)
-  library(dplyr)
-  library(ggplot2)
-  library(glue)
-  library(tidyr)
-  library(tsibble)
-  library(wader)
-  library(mvgam)
-  library(verification)
-  library(future)
-  library(furrr)
-  library(progressr)
-})
-
-# Handle namespace conflicts
-# FIX: pass function references (no parentheses) to conflicts_prefer()
-conflicted::conflicts_prefer(dplyr::filter,    .quiet = TRUE)
-conflicted::conflicts_prefer(dplyr::select,    .quiet = TRUE)
-conflicted::conflicts_prefer(mvgam::AR,        .quiet = TRUE)
-conflicted::conflicts_prefer(mvgam::VAR,       .quiet = TRUE)
-conflicted::conflicts_prefer(mvgam::RW,        .quiet = TRUE)
-conflicted::conflicts_prefer(base::as.matrix,  .quiet = TRUE)
-conflicted::conflicts_prefer(base::get,        .quiet = TRUE)  # FIX: was base::get()
-
-# =============================================================================
-# CHECK CMDSTAN
-# =============================================================================
-library(cmdstanr)
-cat(check_cmdstan_toolchain(fix = TRUE))
-
-# =============================================================================
-# LOAD CONFIGURATION
-# FIX 2 (Copilot): guard_config_init() is called AFTER evaluation.R is sourced
-# below. The guard is defined there and prevents config::get() from
-# overwriting the per-scale CONFIG set by run_all_scales.R.
-# If CONFIG does not already exist, a fresh one is loaded here as fallback.
-# =============================================================================
-print_section("CONFIGURATION")
-
-if (!exists("CONFIG")) {
-  active_config <- Sys.getenv("R_CONFIG_ACTIVE", "default")
-  cat("Loading configuration:", active_config, "\n")
-  CONFIG <- config::get()
-} else {
-  cat("Using pre-set CONFIG (", attr(CONFIG, "config") %||% "custom", ")\n")
-}
-
-# Guard incompatible models when running totals
-if (!is.null(CONFIG$spatial$forecast_totals) && isTRUE(CONFIG$spatial$forecast_totals)) {
-  incompatible_models <- c("species_specific", "trait", "trait2")
-  
-  if (any(incompatible_models %in% CONFIG$models$mvgam)) {
-    CONFIG$models$mvgam <- setdiff(CONFIG$models$mvgam, incompatible_models)
-    cat("  ⚠ Removed incompatible models for totals mode:",
-        paste(intersect(incompatible_models, CONFIG$models$mvgam), collapse = ", "), "\n")
+  section <- function(text) {
+    cat("\n--- ", text, " ---\n", sep = "")
   }
   
-  species_to_aggregate <- if (identical(CONFIG$spatial$include_species, "top6")) {
-    "gbhe, greg, rosp, sneg, wost, whib"
-  } else if (identical(CONFIG$spatial$include_species, "all")) {
-    if (CONFIG$spatial$include_unknowns) "all species (including unknowns)" else "all identified species"
-  } else {
-    paste(CONFIG$spatial$include_species, collapse = ", ")
+  safe_name <- function(x) {
+    gsub("[^A-Za-z0-9_.-]", "_", as.character(x))
   }
   
-  cat("  • Aggregating to Total from:", species_to_aggregate, "\n")
-}
-
-# Print key configuration settings
-cat("\n📋 Configuration Summary:\n")
-cat("  • Environment:",    Sys.getenv("R_CONFIG_ACTIVE", "default"), "\n")
-cat("  • Spatial level:",  CONFIG$spatial$level, "\n")
-cat("  • Forecast totals:", isTRUE(CONFIG$spatial$forecast_totals), "\n")
-cat("  • Run by region:",  CONFIG$spatial$run_by_region, "\n")
-cat("  • mvgam models:",   ifelse(CONFIG$run_mvgam,
-                                  paste(CONFIG$models$mvgam, collapse = ", "), "disabled"), "\n")
-cat("  • fable models:",   ifelse(CONFIG$run_fable,
-                                  paste(CONFIG$models$fable, collapse = ", "), "disabled"), "\n")
-cat("  • MCMC: chains =",  CONFIG$chains,
-    "| burnin =", CONFIG$burnin,
-    "| samples =", CONFIG$samples, "\n")
-cat("  • Train years:",    CONFIG$train_years, "| Test years:", CONFIG$test_years, "\n")
-cat("  • CV windows:",     CONFIG$cv_windows %||% "all", "\n")
-cat("  • Parallel:",       CONFIG$parallel$enabled %||% FALSE, "\n")
-if (isTRUE(CONFIG$parallel$enabled %||% FALSE)) {
-  cat("    Workers:", CONFIG$parallel$workers %||% "auto-detect", "\n")
-}
-cat("  • Ordinal evaluation:", CONFIG$use_ordinal, "\n")
-cat("\n")
-
-# =============================================================================
-# CREATE TIMESTAMPED RUN FOLDER
-# =============================================================================
-print_section("CREATING RUN FOLDER")
-
-timestamp  <- format(Sys.time(), "%Y%m%d-%H%M")
-run_folder <- file.path("results", paste0(
-  "run_", CONFIG$spatial$level, "_",
-  CONFIG$model_key %||% "default", "_",
-  timestamp
-))
-
-dir.create(run_folder,                          recursive = TRUE, showWarnings = FALSE)
-dir.create(file.path(run_folder, "forecasts"), recursive = TRUE, showWarnings = FALSE)
-
-cat("✓ Run folder created:", run_folder, "\n")
-cat("  All outputs will be saved to this folder\n")
-
-# =============================================================================
-# LOAD FUNCTIONS
-# =============================================================================
-print_section("LOADING FUNCTIONS")
-
-source("data_functions.R")
-cat("✓ data_functions.R loaded\n")
-
-source("evaluation.R")
-cat("✓ evaluation.R loaded\n")
-
-# FIX 2 (Copilot): now that evaluation.R is loaded, call the guard.
-guard_config_init()
-
-source("plotting.R")
-cat("✓ plotting.R loaded\n")
-
-# Load fable libraries and models if needed
-if (CONFIG$run_fable) {
-  cat("\nLoading fable libraries...\n")
+  # Source project functions where existing model lookups can find them.
+  source_required <- function(path) {
+    if (!file.exists(path)) {
+      stop("Required file not found: ", path)
+    }
+    source(path, local = .GlobalEnv)
+  }
+  
+  banner("WADING BIRD FORECASTING PIPELINE")
+  cat("Started:", format(start_time, "%Y-%m-%d %H:%M:%S"), "\n")
+  
+  # ===========================================================================
+  # OPTIONAL SYSTEM LIBRARY PRELOAD
+  # Preserve the existing HiPerGator workaround, but do not assume these
+  # paths exist or that they are appropriate for every R installation.
+  # ===========================================================================
+  
+  if (dir.exists("/apps")) {
+    system_libraries <- c(
+      "/apps/udunits/2.2.17/lib/libudunits2.so.0",
+      "/apps/gcc/12.2.0/gdal/3.9.0/lib/libgdal.so"
+    )
+    
+    loaded_paths <- vapply(
+      getLoadedDLLs(),
+      function(x) x[["path"]],
+      character(1)
+    )
+    
+    for (path in system_libraries) {
+      if (file.exists(path) && !path %in% loaded_paths) {
+        tryCatch(
+          dyn.load(path),
+          error = function(e) {
+            warning(
+              "Optional library preload failed: ", path, "\n",
+              conditionMessage(e),
+              call. = FALSE
+            )
+          }
+        )
+      }
+    }
+  }
+  
+  # ===========================================================================
+  # COMMON PACKAGES
+  # ===========================================================================
+  
   suppressPackageStartupMessages({
-    library(fable)
-    library(fable.gam)
-    library(fabletools)
-    library(feasts)
+    library(units)
+    library(sf)
+    library(stars)
+    library(distributional)
+    library(dplyr)
+    library(tidyr)
+    library(ggplot2)
+    library(glue)
+    library(tsibble)
+    library(wader)
+    library(future)
+    library(conflicted)
   })
   
-  # Re-apply conflicts after fable loads
-  conflicted::conflicts_prefer(mvgam::AR,  .quiet = TRUE)
-  conflicted::conflicts_prefer(mvgam::VAR, .quiet = TRUE)
-  conflicted::conflicts_prefer(mvgam::RW,  .quiet = TRUE)
+  conflicted::conflicts_prefer(dplyr::filter, .quiet = TRUE)
+  conflicted::conflicts_prefer(dplyr::select, .quiet = TRUE)
+  conflicted::conflicts_prefer(base::get, .quiet = TRUE)
+  conflicted::conflicts_prefer(base::as.matrix, .quiet = TRUE)
   
-  source("models/fable_models.R")
-  cat("✓ fable models loaded\n")
-}
-
-# Load mvgam model files
-if (CONFIG$run_mvgam) {
-  cat("\nLoading mvgam models:\n")
-  for (model in CONFIG$models$mvgam) {
-    model_file <- file.path("models", paste0("mvgam_", model, ".R"))
-    if (file.exists(model_file)) {
-      source(model_file)
-      cat("  ✓", model, "\n")
-    } else {
-      warning("  ✗ Model file not found: ", model_file)
+  # ===========================================================================
+  # CONFIGURATION
+  # ===========================================================================
+  
+  section("Configuration")
+  
+  if (exists("CONFIG", envir = .GlobalEnv, inherits = FALSE)) {
+    cfg <- get("CONFIG", envir = .GlobalEnv, inherits = FALSE)
+    cat("Using CONFIG supplied by the calling script.\n")
+  } else {
+    cfg <- config::get()
+    cat(
+      "Loaded configuration profile:",
+      Sys.getenv("R_CONFIG_ACTIVE", "default"), "\n"
+    )
+  }
+  
+  cfg$spatial <- cfg$spatial %||% list()
+  cfg$models <- cfg$models %||% list()
+  cfg$cache <- cfg$cache %||% list()
+  cfg$plots <- cfg$plots %||% list()
+  
+  cfg$spatial$level <- cfg$spatial$level %||% "system"
+  
+  # data_functions.R implements system, rather than all, as its branch.
+  if (identical(cfg$spatial$level, "all")) {
+    cfg$spatial$level <- "system"
+  }
+  
+  if (!cfg$spatial$level %in% c("system", "subregion", "colony")) {
+    stop("spatial.level must be system, subregion, or colony.")
+  }
+  
+  cfg$models$mvgam <- unique(as.character(
+    unlist(cfg$models$mvgam %||% character())
+  ))
+  
+  cfg$models$fable <- unique(as.character(
+    unlist(cfg$models$fable %||% character())
+  ))
+  
+  cfg$run_mvgam <- isTRUE(
+    cfg$run_mvgam %||% (length(cfg$models$mvgam) > 0L)
+  )
+  
+  cfg$run_fable <- isTRUE(
+    cfg$run_fable %||% (length(cfg$models$fable) > 0L)
+  )
+  
+  cfg$use_ordinal <- isTRUE(cfg$use_ordinal %||% FALSE)
+  cfg$sliding_window_breaks <- isTRUE(
+    cfg$sliding_window_breaks %||% TRUE
+  )
+  
+  cfg$ordinal_years <- cfg$ordinal_years %||% "All"
+  cfg$ordinal_breaks <- unlist(
+    cfg$ordinal_breaks %||% c(0.33, 0.50, 0.67)
+  )
+  
+  # Defaults: native mvgam window plots enabled.
+  # Existing plotting.R is optional and can still generate comparison plots.
+  cfg$plots$native_mvgam <- isTRUE(
+    cfg$plots$native_mvgam %||% TRUE
+  )
+  
+  cfg$plots$enabled <- isTRUE(cfg$plots$enabled %||% TRUE)
+  
+  if (isTRUE(cfg$spatial$forecast_totals)) {
+    removed <- intersect(
+      cfg$models$mvgam,
+      c("species_specific", "trait", "trait2")
+    )
+    
+    cfg$models$mvgam <- setdiff(cfg$models$mvgam, removed)
+    
+    if (length(removed)) {
+      cat(
+        "Removed species-dependent models for totals:",
+        paste(removed, collapse = ", "), "\n"
+      )
     }
   }
-}
-
-# =============================================================================
-# INITIALIZATION / CLEANUP
-# =============================================================================
-print_section("INITIALIZATION")
-
-# Clean up stale Stan temp files
-stale_xt <- list.files(tempdir(), pattern = "\\.xt$", full.names = TRUE)
-if (length(stale_xt) > 0) {
-  cat("Removing", length(stale_xt), "leftover Stan temp files...\n")
-  file.remove(stale_xt)
-}
-
-# =============================================================================
-# SERIAL PRECOMPUTE OF ALL SHARED ARTIFACTS
-# Must complete before setup_parallel() / plan(multisession) is called.
-# Concurrent writes to SiteandMethods/, WaterData/eden_covariates.csv, and
-# cache/data_*.rds from multiple workers can corrupt shared inputs.
-# =============================================================================
-print_section("PRECOMPUTING SHARED DATA ARTIFACTS")
-
-# 1. Wader observation directory
-needs_download <- !dir.exists("SiteandMethods") || {
-  stamp <- file.info("SiteandMethods")$mtime
-  is.na(stamp) || difftime(Sys.time(), stamp, units = "days") > 7
-}
-
-if (needs_download) {
-  cat("Downloading wader observation data...\n")
-  download_observations(".")
-  cat("✓ Wader observation data downloaded\n")
-} else {
-  age_days <- round(as.numeric(difftime(
-    Sys.time(), file.info("SiteandMethods")$mtime, units = "days"
-  )), 1)
-  cat("✓ Wader data current (", age_days, "days old) — skipping download\n")
-}
-
-# 2. Water covariate data  (writes WaterData/eden_covariates.csv)
-cat("Pre-caching water covariate data...\n")
-tryCatch({
+  
+  if (cfg$run_mvgam && !length(cfg$models$mvgam)) {
+    stop("run_mvgam is enabled but no mvgam models are selected.")
+  }
+  
+  if (cfg$run_fable && !length(cfg$models$fable)) {
+    stop("run_fable is enabled but no fable models are selected.")
+  }
+  
+  if (!cfg$run_mvgam && !cfg$run_fable) {
+    stop("Enable at least one model framework.")
+  }
+  
+  # Publish before sourcing evaluation.R.
+  assign("CONFIG", cfg, envir = .GlobalEnv)
+  
+  source_required("data_functions.R")
+  source_required("evaluation.R")
+  
+  required_helpers <- c(
+    "positive_integer",
+    "ordinal_thresholds",
+    "fit_sliding_window",
+    "make_mvgam_forecasts"
+  )
+  
+  for (helper in required_helpers) {
+    if (!exists(helper, mode = "function", envir = .GlobalEnv)) {
+      stop(
+        "Missing evaluation helper: ", helper,
+        ". Use the rewritten evaluation.R."
+      )
+    }
+  }
+  
+  cfg$train_years <- positive_integer(
+    cfg$train_years %||% 20L, "train_years"
+  )
+  
+  # A supplied forecast_horizon overrides test_years.
+  # Both refer to the number of held-out annual forecast steps per CV window.
+  horizon <- positive_integer(
+    cfg$forecast_horizon %||% cfg$test_years %||% 2L,
+    "forecast_horizon"
+  )
+  
+  cfg$forecast_horizon <- horizon
+  cfg$test_years <- horizon
+  
+  if (!is.null(cfg$cv_windows)) {
+    cfg$cv_windows <- positive_integer(cfg$cv_windows, "cv_windows")
+  }
+  
+  # This matches the rewritten evaluation.R, whose CV loop is sequential.
+  # Do not reset the calling wrapper's future plan here.
+  cfg$parallel <- cfg$parallel %||% list()
+  
+  if (isTRUE(cfg$parallel$enabled)) {
+    cat(
+      "Note: this evaluation.R fits CV windows sequentially;",
+      "outer wrapper parallelism is unchanged.\n"
+    )
+  }
+  
+  cfg$parallel$enabled <- FALSE
+  
+  assign("CONFIG", cfg, envir = .GlobalEnv)
+  
+  cat("Spatial level:", cfg$spatial$level, "\n")
+  cat("Separate regional fits:", isTRUE(cfg$spatial$run_by_region), "\n")
+  cat("Training years:", cfg$train_years, "\n")
+  cat("Forecast/test years per window:", horizon, "\n")
+  cat("CV windows:", cfg$cv_windows %||% "all", "\n")
+  cat("Ordinal evaluation:", cfg$use_ordinal, "\n")
+  
+  # ===========================================================================
+  # FRAMEWORK PACKAGES AND MODEL FUNCTIONS
+  # ===========================================================================
+  
+  section("Loading model functions")
+  
+  if (cfg$run_mvgam) {
+    suppressPackageStartupMessages({
+      library(mvgam)
+      library(cmdstanr)
+    })
+    
+    conflicted::conflicts_prefer(mvgam::AR, .quiet = TRUE)
+    conflicted::conflicts_prefer(mvgam::VAR, .quiet = TRUE)
+    conflicted::conflicts_prefer(mvgam::RW, .quiet = TRUE)
+    
+    # Check only when Stan models are requested.
+    # Do not attempt to modify the compiler setup from a batch job.
+    cmdstanr::check_cmdstan_toolchain(fix = FALSE)
+    
+    for (model_name in cfg$models$mvgam) {
+      source_required(
+        file.path("models", paste0("mvgam_", model_name, ".R"))
+      )
+      
+      function_name <- paste0("fit_mvgam_", model_name)
+      
+      if (!exists(
+        function_name,
+        mode = "function",
+        envir = .GlobalEnv,
+        inherits = FALSE
+      )) {
+        stop("Model file did not define ", function_name)
+      }
+    }
+  }
+  
+  if (cfg$run_fable) {
+    suppressPackageStartupMessages({
+      library(fable)
+      library(fabletools)
+      library(fable.gam)
+      library(feasts)
+    })
+    
+    source_required("models/fable_models.R")
+    
+    if (cfg$run_mvgam) {
+      conflicted::conflicts_prefer(mvgam::AR, .quiet = TRUE)
+      conflicted::conflicts_prefer(mvgam::VAR, .quiet = TRUE)
+      conflicted::conflicts_prefer(mvgam::RW, .quiet = TRUE)
+    }
+  }
+  
+  # ===========================================================================
+  # OUTPUT DIRECTORY
+  # ===========================================================================
+  
+  section("Creating output directory")
+  
+  timestamp <- format(Sys.time(), "%Y%m%d-%H%M%S")
+  
+  folder_stem <- paste0(
+    "run_", safe_name(cfg$spatial$level), "_",
+    safe_name(cfg$model_key %||% "default"), "_", timestamp
+  )
+  
+  run_folder <- file.path("results", folder_stem)
+  
+  # Avoid overwriting an earlier run launched in the same second.
+  suffix <- 0L
+  while (dir.exists(run_folder)) {
+    suffix <- suffix + 1L
+    run_folder <- file.path(
+      "results", paste0(folder_stem, "_", suffix)
+    )
+  }
+  
+  dir.create(run_folder, recursive = TRUE, showWarnings = FALSE)
+  
+  if (!dir.exists(run_folder)) {
+    stop("Could not create output directory: ", run_folder)
+  }
+  
+  assign("run_folder", run_folder, envir = .GlobalEnv)
+  
+  # Save configuration immediately, even if fitting later fails.
+  saveRDS(cfg, file.path(run_folder, "config.rds"))
+  
+  cat("Run folder:", run_folder, "\n")
+  
+  # ===========================================================================
+  # SERIAL DATA PREPARATION
+  # ===========================================================================
+  
+  section("Preparing shared data")
+  
+  dir.create("cache", recursive = TRUE, showWarnings = FALSE)
+  
+  needs_download <- !dir.exists("SiteandMethods")
+  
+  if (!needs_download) {
+    modified <- file.info("SiteandMethods")$mtime
+    
+    needs_download <- is.na(modified) ||
+      as.numeric(difftime(
+        Sys.time(), modified, units = "days"
+      )) > 7
+  }
+  
+  if (needs_download) {
+    wader::download_observations(".")
+  } else {
+    cat("Using existing observation download.\n")
+  }
+  
+  # Stop on preparation failures rather than claiming all inputs are ready.
   get_data_water()
-  cat("✓ Water covariate data cached\n")
-}, error = function(e) {
-  warning("Water data pre-cache failed: ", e$message)
-})
-
-# 3. Wading bird data — one cache file per spatial level
-#    get_wading_bird_data(cache = TRUE) writes cache/data_<level>.rds
-cat("Pre-caching wading bird data...\n")
-tryCatch({
-  get_wading_bird_data(config = CONFIG, cache = TRUE)
-  cat("✓ Wading bird data cached\n")
-}, error = function(e) {
-  warning("Wading bird data pre-cache failed: ", e$message)
-})
-
-# Create cache directory (non-parallel, before any worker could need it)
-if ((CONFIG$cache$data %||% FALSE) || (CONFIG$cache$models %||% FALSE)) {
-  dir.create("cache", showWarnings = FALSE, recursive = TRUE)
-  cat("✓ Cache directory ready\n")
-}
-
-cat("\n✓ All shared artifacts precomputed — safe to start parallel workers\n\n")
-
-# =============================================================================
-# LOAD DATA  (reads from the cache written above — no worker conflict possible)
-# =============================================================================
-print_section("DATA LOADING")
-
-data <- get_wading_bird_data(
-  config = CONFIG,
-  cache  = CONFIG$cache$data %||% TRUE
-)
-
-cat("\n📊 Data Summary:\n")
-cat("  • Years:", min(data$year), "-", max(data$year),
-    glue("({max(data$year) - min(data$year) + 1} years)"), "\n")
-cat("  • Species:", paste(unique(data$species), collapse = ", "), "\n")
-cat("  • Observations:", nrow(data), "\n")
-
-if (CONFIG$spatial$level != "system") {
-  regions <- unique(data$region)
-  cat("  • Regions:", paste(regions, collapse = ", "), "\n")
-  cat("  • N regions:", length(regions), "\n")
   
-  region_summary <- data |>
-    as_tibble() |>
-    group_by(region) |>
-    summarise(
-      n_obs      = n(),
-      n_years    = n_distinct(year),
-      year_range = paste(min(year), max(year), sep = "-"),
-      .groups    = "drop"
-    )
+  data <- get_wading_bird_data(
+    config = cfg,
+    cache = cfg$cache$data %||% TRUE
+  )
   
-  cat("\n  Region details:\n")
-  print(region_summary, n = Inf)
-}
-
-cat("\n")
-
-# =============================================================================
-# PRE-COMPUTE ORDINAL BREAKS (if using fixed breaks across all CV windows)
-# =============================================================================
-
-if (CONFIG$use_ordinal && !CONFIG$sliding_window_breaks) {
-  print_section("ORDINAL BREAK CALCULATION")
+  data <- tibble::as_tibble(data)
   
-  cat("Computing ordinal breaks (fixed)...\n")
-  cat("  Using data from:", CONFIG$ordinal_years, "\n")
-  cat("  Break quantiles:", paste(CONFIG$ordinal_breaks, collapse = ", "), "\n\n")
-  
-  has_regions <- CONFIG$spatial$level != "system" && "region" %in% names(data)
-  
-  if (has_regions) {
-    precomputed_breaks <- data |>
-      as_tibble() |>
-      filter_ordinal_years(CONFIG$ordinal_years) |>
-      group_by(region, species) |>
-      summarise(
-        low    = quantile(count, CONFIG$ordinal_breaks[1], na.rm = TRUE),
-        medium = quantile(count, CONFIG$ordinal_breaks[2], na.rm = TRUE),
-        high   = quantile(count, CONFIG$ordinal_breaks[3], na.rm = TRUE),
-        .groups = "drop"
-      )
-  } else {
-    precomputed_breaks <- data |>
-      as_tibble() |>
-      filter_ordinal_years(CONFIG$ordinal_years) |>
-      group_by(species) |>
-      summarise(
-        low    = quantile(count, CONFIG$ordinal_breaks[1], na.rm = TRUE),
-        medium = quantile(count, CONFIG$ordinal_breaks[2], na.rm = TRUE),
-        high   = quantile(count, CONFIG$ordinal_breaks[3], na.rm = TRUE),
-        .groups = "drop"
-      )
+  if (!nrow(data)) {
+    stop("Data preparation returned no observations.")
   }
   
-  cat("✓ Ordinal breaks computed for", nrow(precomputed_breaks), "groups\n")
-  
-  if (nrow(precomputed_breaks) <= 10) {
-    print(precomputed_breaks)
-  } else {
-    cat("\n  Preview (first 6 rows):\n")
-    print(head(precomputed_breaks))
+  if (!all(c("species", "year", "count") %in% names(data))) {
+    stop("Prepared data must contain species, year, and count.")
   }
   
-} else {
+  # System-level data may carry a constant water-region column.
+  # Remove it so system models use species-only keys.
+  if (identical(cfg$spatial$level, "system")) {
+    data <- data |> dplyr::select(-any_of("region"))
+  } else {
+    if (!"region" %in% names(data) || anyNA(data$region)) {
+      stop("Spatial data must contain non-missing region labels.")
+    }
+    
+    data$region <- as.character(data$region)
+  }
+  
+  data <- data |>
+    dplyr::arrange(year, species)
+  
+  if (anyNA(data$year)) {
+    stop("Prepared data contains missing years.")
+  }
+  
+  assign("data", data, envir = .GlobalEnv)
+  
+  # Save the exact observations used, allowing plotting-only reruns.
+  saveRDS(data, file.path(run_folder, "data.rds"))
+  
+  cat("Years:", min(data$year), "-", max(data$year), "\n")
+  cat("Species:", paste(unique(data$species), collapse = ", "), "\n")
+  cat("Observations:", nrow(data), "\n")
+  
+  # ===========================================================================
+  # FIXED ORDINAL THRESHOLDS
+  # ===========================================================================
+  
   precomputed_breaks <- NULL
-  if (CONFIG$use_ordinal) {
-    cat("ℹ Using sliding window ordinal breaks (computed per CV fold)\n")
+  
+  if (cfg$use_ordinal && !cfg$sliding_window_breaks) {
+    section("Computing fixed ordinal thresholds")
+    
+    warning(
+      "Fixed ordinal thresholds are computed from the full dataset. ",
+      "They therefore use information from held-out years. ",
+      "Use sliding_window_breaks: true for training-only thresholds.",
+      call. = FALSE
+    )
+    
+    precomputed_breaks <- ordinal_thresholds(data, cfg)
+    
+    saveRDS(
+      precomputed_breaks,
+      file.path(run_folder, "ordinal_breaks.rds")
+    )
   }
-}
-
-# =============================================================================
-# MODEL FITTING FUNCTION (with parallel / cv_windows support)
-# precomputed_breaks propagated through to make_mvgam_forecasts /
-# make_fable_forecasts (and on to make_fable_evaluation) via ...
-# =============================================================================
-
-run_models <- function(data, framework = "mvgam", models_to_run,
-                       precomputed_breaks = NULL, ...) {
   
-  make_forecast_fn <- switch(
-    framework,
-    "mvgam" = make_mvgam_forecasts,
-    "fable" = make_fable_forecasts,
-    stop("Unknown framework: ", framework)
+  # ===========================================================================
+  # FRAMEWORK RUNNER
+  # ===========================================================================
+  
+  run_models <- function(input_data, framework, breaks = NULL) {
+    forecast_function <- switch(
+      framework,
+      mvgam = make_mvgam_forecasts,
+      fable = make_fable_forecasts,
+      stop("Unknown framework: ", framework)
+    )
+    
+    model_names <- cfg$models[[framework]]
+    
+    fit_sliding_window(
+      data = input_data,
+      make_forecast = forecast_function,
+      train_years = cfg$train_years,
+      test_years = cfg$test_years,
+      cv_windows = cfg$cv_windows,
+      parallel = FALSE,
+      models_to_run = model_names,
+      use_ordinal = cfg$use_ordinal,
+      precomputed_breaks = breaks,
+      config = cfg
+    )
+  }
+  
+  frameworks <- c(
+    if (cfg$run_mvgam) "mvgam",
+    if (cfg$run_fable) "fable"
   )
   
-  fit_sliding_window(
-    data               = data,
-    make_forecast      = make_forecast_fn,
-    train_years        = CONFIG$train_years,
-    test_years         = CONFIG$test_years,
-    models_to_run      = models_to_run,
-    use_ordinal        = CONFIG$use_ordinal,
-    precomputed_breaks = precomputed_breaks,
-    cv_windows         = CONFIG$cv_windows %||% NULL,
-    parallel           = CONFIG$parallel$enabled %||% FALSE,
-    workers            = CONFIG$parallel$workers %||% NULL,
-    ...
-  )
-}
-
-# =============================================================================
-# RUN FORECASTS
-# =============================================================================
-print_banner("MODEL FITTING AND FORECASTING")
-
-results <- list()
-
-# Determine if running by region
-run_by_region <- isTRUE(CONFIG$spatial$run_by_region) &&
-  CONFIG$spatial$level != "system"
-
-# ---------------------------------------------------------------------------
-# OPTION 1: SEPARATE MODELS PER REGION
-# ---------------------------------------------------------------------------
-
-if (run_by_region) {
+  # ===========================================================================
+  # FIT AND PRESERVE RESULTS
+  # ===========================================================================
   
-  regions <- unique(as_tibble(data)$region)
+  banner("MODEL FITTING AND FORECASTING")
   
-  print_section(glue("RUNNING MODELS SEPARATELY BY REGION ({length(regions)} regions)"))
-  cat("⚠️  Note: Running hierarchical models (run_by_region: false) is faster!\n\n")
+  results <- list()
+  run_by_region <- isTRUE(cfg$spatial$run_by_region) &&
+    cfg$spatial$level != "system"
   
-  region_results <- list()
-  
-  for (i in seq_along(regions)) {
-    reg <- regions[i]
+  if (run_by_region) {
+    regions <- sort(unique(data$region))
+    region_results <- list()
     
-    cat("\n", paste(rep("=", 70), collapse = ""), "\n", sep = "")
-    cat(glue("REGION {i}/{length(regions)}: {reg}"), "\n")
-    cat(paste(rep("=", 70), collapse = ""), "\n\n", sep = "")
-    
-    data_region <- data |> filter(region == reg)
-    
-    all_series <- unique(data_region$species)
-    min_year   <- min(data_region$year)
-    
-    data_region <- data_region |>
-      mutate(
-        time   = as.integer(year - min_year + 1),
-        series = factor(species, levels = all_series)
-      ) |>
-      as.data.frame()
-    
-    cat("  • Years:", min(data_region$year), "-", max(data_region$year), "\n")
-    cat("  • Observations:", nrow(data_region), "\n")
-    cat("  • Species:", paste(unique(data_region$species), collapse = ", "), "\n\n")
-    
-    # Region-specific ordinal breaks
-    if (CONFIG$use_ordinal && !CONFIG$sliding_window_breaks) {
-      precomputed_breaks_region <- data_region |>
-        as_tibble() |>
-        filter_ordinal_years(CONFIG$ordinal_years) |>
-        group_by(species) |>
-        summarise(
-          low    = quantile(count, CONFIG$ordinal_breaks[1], na.rm = TRUE),
-          medium = quantile(count, CONFIG$ordinal_breaks[2], na.rm = TRUE),
-          high   = quantile(count, CONFIG$ordinal_breaks[3], na.rm = TRUE),
-          .groups = "drop"
+    for (region_name in regions) {
+      section(paste("Region:", region_name))
+      
+      region_data <- data |>
+        dplyr::filter(region == region_name)
+      
+      region_breaks <- precomputed_breaks
+      
+      if (!is.null(region_breaks) &&
+          "region" %in% names(region_breaks)) {
+        region_breaks <- region_breaks |>
+          dplyr::filter(region == region_name)
+      }
+      
+      region_result <- list()
+      
+      for (framework in frameworks) {
+        region_result[[framework]] <- tryCatch(
+          run_models(region_data, framework, region_breaks),
+          error = function(e) {
+            warning(
+              framework, " failed for region ", region_name, ": ",
+              conditionMessage(e), call. = FALSE
+            )
+            
+            list(
+              forecasts = tibble::tibble(),
+              metrics = tibble::tibble(),
+              cv_info = NULL,
+              window_objects = list(),
+              error = conditionMessage(e)
+            )
+          }
         )
+      }
+      
+      region_results[[region_name]] <- region_result
+      
+      # Checkpoint completed regions; preserves raw forecast objects.
+      saveRDS(
+        list(by_region = region_results),
+        file.path(run_folder, "regional_checkpoint.rds")
+      )
+    }
+    
+    results$by_region <- region_results
+    
+    for (framework in frameworks) {
+      extract_table <- function(region_name, table_name) {
+        x <- region_results[[region_name]][[framework]][[table_name]]
+        
+        if (is.null(x) || !nrow(x)) {
+          return(tibble::tibble())
+        }
+        
+        x |>
+          dplyr::mutate(region = region_name)
+      }
+      
+      # Flatten window records without combining forecast objects themselves.
+      # Each record retains its own model objects and regional metadata.
+      combined_windows <- list()
+      regional_cv_info <- list()
+      
+      for (region_name in names(region_results)) {
+        regional_result <- region_results[[region_name]][[framework]]
+        
+        regional_cv_info[region_name] <- list(
+          regional_result$cv_info
+        )
+        
+        windows <- regional_result$window_objects %||% list()
+        
+        for (window_name in names(windows)) {
+          record <- windows[[window_name]]
+          record$region <- region_name
+          
+          key <- paste(region_name, window_name, sep = "::")
+          combined_windows[[key]] <- record
+        }
+      }
+      
+      results[[framework]] <- list(
+        forecasts = dplyr::bind_rows(lapply(
+          names(region_results), extract_table,
+          table_name = "forecasts"
+        )),
+        metrics = dplyr::bind_rows(lapply(
+          names(region_results), extract_table,
+          table_name = "metrics"
+        )),
+        cv_info = list(
+          train_years = cfg$train_years,
+          test_years = cfg$test_years,
+          by_region = regional_cv_info
+        ),
+        window_objects = combined_windows
+      )
+    }
+  } else {
+    section("Fitting all selected series together")
+    
+    # A joint fit is not automatically a hierarchical model.
+    # Hierarchical structure depends on each model's formula.
+    for (framework in frameworks) {
+      results[[framework]] <- run_models(
+        data, framework, precomputed_breaks
+      )
+    }
+  }
+  
+  # ===========================================================================
+  # SAVE BEFORE PLOTTING
+  # ===========================================================================
+  
+  section("Saving results")
+  
+  results_path <- file.path(run_folder, "forecast_results.rds")
+  
+  saveRDS(results, results_path)
+  assign("results", results, envir = .GlobalEnv)
+  
+  cat("Saved:", results_path, "\n")
+  cat("Raw forecast objects are included in window_objects.\n")
+  
+  saveRDS(
+    list(
+      started = start_time,
+      saved = Sys.time(),
+      session = utils::sessionInfo()
+    ),
+    file.path(run_folder, "run_metadata.rds")
+  )
+  
+  # ===========================================================================
+  # NATIVE MVGAM WINDOW PLOTTING
+  # ===========================================================================
+  
+  save_native_mvgam_plots <- function(window_objects, output_dir) {
+    if (!length(window_objects)) {
+      message("No raw mvgam window objects available.")
+      return(invisible(NULL))
+    }
+    
+    # Resolve the native helper without assuming it is exported.
+    ns <- asNamespace("mvgam")
+    
+    native_plot <- if (exists(
+      "plot_mvgam_forecast", envir = ns, inherits = FALSE
+    )) {
+      get("plot_mvgam_forecast", envir = ns, inherits = FALSE)
     } else {
-      precomputed_breaks_region <- precomputed_breaks
+      NULL
     }
     
-    region_result <- list()
+    draw_native <- function(fc, series_index) {
+      if (is.function(native_plot) &&
+          "series" %in% names(formals(native_plot))) {
+        native_plot(fc, series = series_index)
+      } else {
+        # Dispatches to the installed forecast object's plotting method.
+        graphics::plot(fc, series = series_index)
+      }
+    }
     
-    if (CONFIG$run_mvgam) {
-      cat("Running mvgam models for", reg, "...\n")
-      region_result$mvgam <- tryCatch({
-        run_models(
-          data               = data_region,
-          framework          = "mvgam",
-          models_to_run      = CONFIG$models$mvgam,
-          precomputed_breaks = precomputed_breaks_region
+    save_one <- function(fc, series_index, filename) {
+      grDevices::png(
+        filename,
+        width = 1600,
+        height = 900,
+        res = 150
+      )
+      
+      device_id <- grDevices::dev.cur()
+      
+      on.exit({
+        devices <- grDevices::dev.list()
+        
+        if (!is.null(devices) && device_id %in% devices) {
+          grDevices::dev.off(which = device_id)
+        }
+      }, add = TRUE)
+      
+      draw_native(fc, series_index)
+      invisible(filename)
+    }
+    
+    manifest <- list()
+    
+    for (window_key in names(window_objects)) {
+      record <- window_objects[[window_key]]
+      
+      region_label <- record$region %||% "joint"
+      
+      if (!length(record$models)) next
+      
+      train_df <- record$train_data
+      series_keys <- c(
+        "species",
+        intersect("region", names(train_df))
+      )
+      
+      series_table <- train_df |>
+        dplyr::distinct(across(all_of(series_keys)))
+      
+      n_series <- nrow(series_table)
+      
+      for (model_name in names(record$models)) {
+        fc <- record$models[[model_name]]
+        if (is.null(fc)) next
+        
+        destination <- file.path(
+          output_dir,
+          safe_name(region_label),
+          paste0(
+            "window_", record$window,
+            "_test_", record$test_start, "-", record$test_end
+          ),
+          safe_name(model_name)
         )
-      }, error = function(e) {
-        warning(glue("mvgam failed for region {reg}: {e$message}"))
-        NULL
-      })
-    }
-    
-    if (CONFIG$run_fable) {
-      cat("Running fable models for", reg, "...\n")
-      region_result$fable <- tryCatch({
-        run_models(
-          data               = data_region,
-          framework          = "fable",
-          models_to_run      = CONFIG$models$fable,
-          precomputed_breaks = precomputed_breaks_region
+        
+        dir.create(
+          destination, recursive = TRUE, showWarnings = FALSE
         )
-      }, error = function(e) {
-        warning(glue("fable failed for region {reg}: {e$message}"))
-        NULL
-      })
+        
+        for (series_index in seq_len(n_series)) {
+          filename <- file.path(
+            destination,
+            sprintf("series_%03d.png", series_index)
+          )
+          
+          error_message <- NULL
+          
+          success <- tryCatch({
+            save_one(fc, series_index, filename)
+            TRUE
+          }, error = function(e) {
+            error_message <<- conditionMessage(e)
+            
+            warning(
+              "Native plot failed: ", window_key, " / ",
+              model_name, " / series ", series_index, ": ",
+              error_message,
+              call. = FALSE
+            )
+            
+            FALSE
+          })
+          
+          # Remove incomplete images rather than leaving misleading files.
+          if (!success && file.exists(filename)) {
+            unlink(filename)
+          }
+          
+          manifest[[length(manifest) + 1L]] <- tibble::tibble(
+            window_key = window_key,
+            region = as.character(region_label),
+            model = model_name,
+            series_index = series_index,
+            test_start = record$test_start,
+            test_end = record$test_end,
+            filename = filename,
+            success = success,
+            error = error_message %||% NA_character_
+          )
+        }
+      }
     }
     
-    region_results[[reg]] <- region_result
-    cat("\n✓ Region", reg, "complete!\n")
-  }
-  
-  # Combine results from all regions
-  cat("\n", paste(rep("=", 70), collapse = ""), "\n", sep = "")
-  cat("COMBINING RESULTS FROM ALL REGIONS\n")
-  cat(paste(rep("=", 70), collapse = ""), "\n\n", sep = "")
-  
-  results$by_region <- region_results
-  
-  if (CONFIG$run_mvgam) {
-    results$mvgam <- list(
-      forecasts = bind_rows(lapply(names(region_results), function(reg) {
-        if (!is.null(region_results[[reg]]$mvgam))
-          region_results[[reg]]$mvgam$forecasts |> mutate(region = reg)
-      })),
-      metrics = bind_rows(lapply(names(region_results), function(reg) {
-        if (!is.null(region_results[[reg]]$mvgam))
-          region_results[[reg]]$mvgam$metrics |> mutate(region = reg)
-      }))
-    )
-    cat("✓ mvgam results combined:", nrow(results$mvgam$forecasts), "forecasts\n")
-  }
-  
-  if (CONFIG$run_fable) {
-    results$fable <- list(
-      forecasts = bind_rows(lapply(names(region_results), function(reg) {
-        if (!is.null(region_results[[reg]]$fable))
-          region_results[[reg]]$fable$forecasts |> mutate(region = reg)
-      })),
-      metrics = bind_rows(lapply(names(region_results), function(reg) {
-        if (!is.null(region_results[[reg]]$fable))
-          region_results[[reg]]$fable$metrics |> mutate(region = reg)
-      }))
-    )
-    cat("✓ fable results combined:", nrow(results$fable$forecasts), "forecasts\n")
-  }
-  
-  # ---------------------------------------------------------------------------
-  # OPTION 2: HIERARCHICAL MODEL (faster, recommended)
-  # ---------------------------------------------------------------------------
-  
-} else {
-  
-  print_section("RUNNING HIERARCHICAL MODELS")
-  cat("✓ Using efficient hierarchical approach\n\n")
-  
-  if (CONFIG$run_mvgam) {
-    cat("=== Running mvgam models ===\n")
-    cat("Models:", paste(CONFIG$models$mvgam, collapse = ", "), "\n\n")
+    if (length(manifest)) {
+      utils::write.csv(
+        dplyr::bind_rows(manifest),
+        file.path(output_dir, "plot_manifest.csv"),
+        row.names = FALSE
+      )
+    }
     
-    results$mvgam <- run_models(
-      data               = data,
-      framework          = "mvgam",
-      models_to_run      = CONFIG$models$mvgam,
-      precomputed_breaks = precomputed_breaks
-    )
+    invisible(NULL)
+  }
+  
+  if (cfg$run_mvgam && cfg$plots$native_mvgam) {
+    section("Native mvgam plots for every window")
     
-    if (!is.null(results$mvgam)) {
-      cat("\n✓ mvgam forecasts complete!\n")
-      print_cv_summary(results$mvgam)
+    native_dir <- file.path(run_folder, "forecasts_native")
+    dir.create(native_dir, recursive = TRUE, showWarnings = FALSE)
+    
+    save_native_mvgam_plots(
+      results$mvgam$window_objects,
+      native_dir
+    )
+  }
+  
+  # ===========================================================================
+  # EXISTING COMPARISON / SKILL PLOTS
+  # Native forecasts above do not depend on plotting.R.
+  # ===========================================================================
+  
+  if (cfg$plots$enabled && file.exists("plotting.R")) {
+    section("Comparison and skill plots")
+    
+    tryCatch({
+      source_required("plotting.R")
+      
+      if (!exists(
+        "generate_plots", mode = "function", envir = .GlobalEnv
+      )) {
+        stop("plotting.R does not define generate_plots().")
+      }
+      
+      generate_plots(
+        results = results,
+        config = cfg,
+        data = data,
+        results_dir = run_folder
+      )
+    }, error = function(e) {
+      warning(
+        "Comparison plotting failed: ", conditionMessage(e),
+        ". Saved model results are unaffected.",
+        call. = FALSE
+      )
+    })
+  }
+  
+  # ===========================================================================
+  # FINAL SUMMARY AND WRAPPER OUTPUTS
+  # ===========================================================================
+  
+  banner("ANALYSIS COMPLETE")
+  
+  for (framework in frameworks) {
+    x <- results[[framework]]
+    
+    cat("\nFramework:", framework, "\n")
+    cat("Forecast rows:", nrow(x$forecasts), "\n")
+    cat("Metric rows:", nrow(x$metrics), "\n")
+    cat("Stored window records:", length(x$window_objects), "\n")
+    
+    # The aggregated regional cv_info has no single n_windows value.
+    if (!run_by_region) {
+      print_cv_summary(x)
     }
   }
   
-  if (CONFIG$run_fable) {
-    cat("\n=== Running fable models ===\n")
-    cat("Models:", paste(CONFIG$models$fable, collapse = ", "), "\n\n")
-    
-    results$fable <- run_models(
-      data               = data,
-      framework          = "fable",
-      models_to_run      = CONFIG$models$fable,
-      precomputed_breaks = precomputed_breaks
-    )
-    
-    if (!is.null(results$fable)) {
-      cat("\n✓ fable forecasts complete!\n")
-      print_cv_summary(results$fable)
-    }
-  }
-}
-
-# =============================================================================
-# SAVE RESULTS
-# =============================================================================
-print_section("SAVING RESULTS")
-
-results_filename <- file.path(run_folder, "forecast_results.rds")
-saveRDS(results, results_filename)
-cat("✓ Results saved to:", results_filename, "\n")
-
-config_filename <- file.path(run_folder, "config.rds")
-saveRDS(CONFIG, config_filename)
-cat("✓ Config saved to:", config_filename, "\n")
-
-# =============================================================================
-# GENERATE PLOTS
-# =============================================================================
-print_section("GENERATING PLOTS")
-
-tryCatch({
-  generate_plots(results, CONFIG, data = data, results_dir = run_folder)
-  cat("✓ All plots saved to:", run_folder, "\n")
-}, error = function(e) {
-  warning("Plotting failed: ", e$message)
-})
-
-# =============================================================================
-# FINAL SUMMARY
-# =============================================================================
-print_banner("ANALYSIS COMPLETE")
-
-elapsed <- difftime(Sys.time(), start_time, units = "mins")
-cat("⏱  Total runtime:", round(as.numeric(elapsed), 1), "minutes\n\n")
-
-cat("📂 Run Folder:", run_folder, "\n\n")
-
-cat("📊 Configuration:\n")
-cat("  • Spatial level:", CONFIG$spatial$level, "\n")
-cat("  • Evaluation:",    ifelse(CONFIG$use_ordinal,
-                                 "Numeric + Ordinal (RPS)", "Numeric only (CRPS)"), "\n")
-cat("  • Data type:",     CONFIG$data_type, "\n\n")
-
-if (CONFIG$run_mvgam && !is.null(results$mvgam)) {
-  cat("🔵 mvgam Results:\n")
-  cat("  • Models:",      paste(CONFIG$models$mvgam, collapse = ", "), "\n")
-  cat("  • Forecasts:",   nrow(results$mvgam$forecasts), "\n")
-  cat("  • Metric rows:", nrow(results$mvgam$metrics), "\n")
+  elapsed <- as.numeric(difftime(
+    Sys.time(), start_time, units = "mins"
+  ))
   
-  if (nrow(results$mvgam$metrics) > 0 && "crps" %in% names(results$mvgam$metrics)) {
-    best_model <- results$mvgam$metrics |>
-      group_by(model) |>
-      summarise(mean_crps = mean(crps, na.rm = TRUE), .groups = "drop") |>
-      arrange(mean_crps) |>
-      slice(1)
-    cat("  • Best model:", best_model$model,
-        glue("(mean CRPS = {round(best_model$mean_crps, 3)})"), "\n")
-  }
+  cat("\nRuntime:", round(elapsed, 1), "minutes\n")
+  cat("Results:", run_folder, "\n")
+  
+  # Required by the current run_all_scales.R sourcing pattern.
+  assign("CONFIG", cfg, envir = .GlobalEnv)
+  assign("run_folder", run_folder, envir = .GlobalEnv)
+  assign("results", results, envir = .GlobalEnv)
+  assign("data", data, envir = .GlobalEnv)
+  
+  invisible(list(
+    results = results,
+    config = cfg,
+    data = data,
+    run_folder = run_folder
+  ))
 }
 
-if (CONFIG$run_fable && !is.null(results$fable)) {
-  cat("🟢 fable Results:\n")
-  cat("  • Models:",      paste(CONFIG$models$fable, collapse = ", "), "\n")
-  cat("  • Forecasts:",   nrow(results$fable$forecasts), "\n")
-  cat("  • Metric rows:", nrow(results$fable$metrics), "\n")
-}
-
-cat("\n")
-
-end_time <- Sys.time()
-runtime  <- difftime(end_time, start_time, units = "mins")
-cat("⏱️  Runtime:", round(runtime, 1), "minutes\n")
-cat("💾 All results saved to:", run_folder, "\n")
-cat("✅ Analysis complete at:", format(end_time, "%Y-%m-%d %H:%M:%S"), "\n\n")
-
-# =============================================================================
-# CLEANUP
-# =============================================================================
-plan(sequential)
-cat("🎉 Done!\n\n")
+run_forecasting_pipeline()

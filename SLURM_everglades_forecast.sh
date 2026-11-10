@@ -4,11 +4,11 @@
 #SBATCH --qos=ewhite
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=12gb
+#SBATCH --mem=24gb
 #SBATCH --time=72:00:00
 #SBATCH --output=/blue/ewhite/alexanderblochel/logs/forecast_%j.out
 #SBATCH --error=/blue/ewhite/alexanderblochel/logs/forecast_%j.err
-#SBATCH --mail-type=END,FAIL
+#SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=alexanderblochel@ufl.edu
 
 echo "INFO: [$(date "+%Y-%m-%d %H:%M:%S")] Starting forecast job on $(hostname)"
