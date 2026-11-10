@@ -54,6 +54,7 @@ default:
   # Cross-validation parameters
   train_years: 20
   test_years: 2
+  forecast_horizon: 2 
   cv_windows: null              # null = all windows, or set number to limit
 
   # Parallel processing 

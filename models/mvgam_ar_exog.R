@@ -69,7 +69,7 @@ fit_mvgam_ar_exog <- function(train_data, test_data, config) {
       samples       = config$samples
     )
     
-    fc   <- forecast(model, newdata = test_data)
+    fc   <- forecast(model, newdata = test_data, type = "response")
     crps <- extract_crps_mvgam(fc, model_name = "ar_exog")
     
     return(list(fc = fc, crps = crps))
