@@ -49,7 +49,7 @@ MVGAM_MODELS     <- c('ar', 'ar_exog')
 # c('ar', 'ar_exog', 'ar_exog_plus', 'trait', 'species_specific', 'trait2')
 PARALLEL         <- FALSE
 PARALLEL_WORKERS <- 3
-
+FORECAST_HORIZON  <- 2
 
 
 
@@ -138,6 +138,7 @@ base_config$models$mvgam            <- MVGAM_MODELS
 base_config$models$fable            <- FABLE_MODELS
 base_config$run_mvgam               <- length(MVGAM_MODELS) > 0
 base_config$run_fable               <- length(FABLE_MODELS) > 0
+base_config$forecast_horizon        <- FORECAST_HORIZON
 saveRDS(base_config, file.path(scale_run_folder, "base_config.rds"))
 
 cat("📋 Configuration:\n")
