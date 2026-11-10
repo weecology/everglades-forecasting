@@ -8,7 +8,7 @@
 #SBATCH --time=72:00:00
 #SBATCH --output=/blue/ewhite/alexanderblochel/logs/forecast_%j.out
 #SBATCH --error=/blue/ewhite/alexanderblochel/logs/forecast_%j.err
-#SBATCH --mail-type=END,FAIL
+#SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=alexanderblochel@ufl.edu
 
 echo "INFO: [$(date "+%Y-%m-%d %H:%M:%S")] Starting forecast job on $(hostname)"
