@@ -108,7 +108,6 @@ choose
 - training and testing windown size
 
 ```
-
 main.R:
   ↓
 if sliding_window_breaks = FALSE:
@@ -124,12 +123,21 @@ Pass to fit_sliding_window()
   ↓
 For each window:
     ↓
+    Save train_data.rds and test_data.rds to disk
+    ↓
+    For each model:
+        Fit model → save forecast.rds → generate native PDF → delete .rds
+    ↓
     if precomputed_breaks exists:
         Use fixed breaks
     else:
         Compute from training window
         ↓
         filter_ordinal_years(ordinal_years) → subset if needed
+  ↓
+Save metrics_only.rds (small, for cross-scale comparisons)
+  ↓
+generate_plots() → skill plots + forecast PDFs
 ```
 
 
