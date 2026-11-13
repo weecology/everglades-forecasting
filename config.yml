@@ -81,6 +81,7 @@ default:
     forecast_timeseries: true
     ts_models: ["baseline", "ar", "trait"]
     ts_species: ["gbhe", "greg", "rosp", "wost", "whib", "sneg"]
+    generate_forecast_pdfs: true
 
 # -----------------------------------------------------------------------------
 # TESTING CONFIGURATIONS (Fast iterations for development)

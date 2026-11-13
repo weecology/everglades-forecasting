@@ -9,11 +9,14 @@
 # Each disk-backed window record contains:
 #   train_file, test_file, model_files, test_start, test_end
 #
-# Raw forecast files are loaded ONE MODEL AT A TIME.
-# Native plots are written beside each saved forecast file:
-#   windows/<location>_<year>/<framework>/<model>/plots/
+# Raw forecast .rds files are loaded ONE MODEL AT A TIME.
+# After plotting, each .rds is deleted and replaced with a PDF.
 #
-# Skill plots are split into batches of series.
+# PDF structure:
+#   One PDF per model per window, one page per series.
+#   Page header: <window> / <framework> / <model> | <series_label>
+#
+# Skill plots are split into batches of series to limit graphics memory.
 # No model fitting or regional interval aggregation is performed here.
 # =============================================================================
 
@@ -29,11 +32,7 @@ library(tidyr)
 
 plot_make_dir <- function(path) {
   dir.create(path, recursive = TRUE, showWarnings = FALSE)
-  
-  if (!dir.exists(path)) {
-    stop("Could not create directory: ", path)
-  }
-  
+  if (!dir.exists(path)) stop("Could not create directory: ", path)
   invisible(path)
 }
 
@@ -49,10 +48,7 @@ plot_attempt <- function(label, expr) {
   tryCatch(
     force(expr),
     error = function(e) {
-      warning(
-        label, ": ", conditionMessage(e),
-        call. = FALSE
-      )
+      warning(label, ": ", conditionMessage(e), call. = FALSE)
       invisible(NULL)
     }
   )
@@ -60,7 +56,6 @@ plot_attempt <- function(label, expr) {
 
 plot_file_valid <- function(path) {
   if (!file.exists(path)) return(FALSE)
-  
   size <- file.info(path)$size
   !is.na(size) && size > 0
 }
@@ -84,7 +79,6 @@ get_plot_windows <- function(results, framework) {
     return(x$window_objects)
   }
   
-  # Fallback for results retained only under by_region.
   windows <- list()
   
   for (region_name in names(results$by_region %||% list())) {
@@ -93,7 +87,6 @@ get_plot_windows <- function(results, framework) {
     for (window_name in names(regional$window_objects %||% list())) {
       record <- regional$window_objects[[window_name]]
       record$region <- region_name
-      
       key <- paste(region_name, window_name, sep = "::")
       windows[[key]] <- record
     }
@@ -120,36 +113,169 @@ plot_resolve_file <- function(results_dir, relative_file) {
 }
 
 # =============================================================================
-# NATIVE MVGAM PLOTTING
+# FORECAST PDF GENERATION
+#
+# Walks all saved forecast.rds files, plots every series using mvgam's
+# native plot() method, saves all series as pages in a single PDF,
+# then deletes the .rds file to free disk space.
+#
+# Called automatically from generate_plots() at the end of the pipeline.
+# Can also be called standalone:
+#   generate_forecast_pdfs("results/run_subregion_mvgam_ar_20261110")
+# =============================================================================
+
+generate_forecast_pdfs <- function(results_dir) {
+  if (!requireNamespace("mvgam", quietly = TRUE)) {
+    stop("mvgam is required for forecast PDF generation.")
+  }
+  
+  rds_files <- list.files(
+    path      = results_dir,
+    pattern   = "^forecast\\.rds$",
+    recursive = TRUE,
+    full.names = TRUE
+  )
+  
+  if (!length(rds_files)) {
+    message("No forecast.rds files found under: ", results_dir)
+    return(invisible(NULL))
+  }
+  
+  cat("Generating forecast PDFs for", length(rds_files), "saved file(s)...\n")
+  
+  # Derive a human-readable title from the file path.
+  # Path structure written by evaluation.R:
+  #   windows/<location>_<test_year>/<framework>/<model>/forecast.rds
+  derive_title <- function(path) {
+    parts <- strsplit(path, .Platform$file.sep, fixed = TRUE)[[1]]
+    n <- length(parts)
+    
+    model_name <- if (n >= 2L) parts[n - 1L] else "unknown_model"
+    framework  <- if (n >= 3L) parts[n - 2L] else "unknown_framework"
+    window     <- if (n >= 4L) parts[n - 3L] else "unknown_window"
+    
+    paste(window, framework, model_name, sep = " / ")
+  }
+  
+  rows <- lapply(seq_along(rds_files), function(i) {
+    rds_path <- rds_files[i]
+    title    <- derive_title(rds_path)
+    pdf_path <- sub("\\.rds$", ".pdf", rds_path)
+    
+    cat(sprintf("  [%d/%d] %s\n", i, length(rds_files), title))
+    
+    error_text <- NA_character_
+    
+    success <- tryCatch({
+      fc <- readRDS(rds_path)
+      
+      if (!inherits(fc, "mvgam_forecast")) {
+        stop("Not an mvgam_forecast object.")
+      }
+      
+      labels <- as.character(fc$series_names)
+      if (!length(labels)) labels <- names(fc$forecasts)
+      if (!length(labels)) stop("Cannot identify series.")
+      
+      grDevices::pdf(pdf_path, width = 11, height = 7, title = title)
+      
+      on.exit({
+        if (grDevices::dev.cur() > 1L) grDevices::dev.off()
+      }, add = TRUE)
+      
+      for (s in seq_along(labels)) {
+        # Native mvgam plot:
+        #   grey ribbon  = fitted period (in-sample predictions)
+        #   red ribbon   = forecast period
+        #   black dots   = observations
+        graphics::plot(fc, series = s)
+        
+        graphics::mtext(
+          text = paste0(title, "  |  ", labels[s]),
+          side = 3, line = 0.3, adj = 0,
+          cex = 0.75, col = "grey40"
+        )
+      }
+      
+      grDevices::dev.off()
+      
+      # Only delete the .rds after confirming the PDF is non-empty.
+      if (!file.exists(pdf_path) || file.info(pdf_path)$size == 0L) {
+        stop("PDF not created or empty: ", pdf_path)
+      }
+      
+      file.remove(rds_path)
+      cat("    ✓ PDF saved, .rds removed\n")
+      TRUE
+      
+    }, error = function(e) {
+      error_text <<- conditionMessage(e)
+      
+      if (grDevices::dev.cur() > 1L) {
+        tryCatch(grDevices::dev.off(), error = function(e2) NULL)
+      }
+      
+      # Remove a partial PDF but leave the .rds intact for inspection.
+      if (file.exists(pdf_path) && file.info(pdf_path)$size == 0L) {
+        unlink(pdf_path)
+      }
+      
+      cat("    ✗ FAILED:", error_text, "\n")
+      FALSE
+    })
+    
+    tibble::tibble(
+      file    = rds_path,
+      pdf     = pdf_path,
+      title   = title,
+      success = success,
+      error   = ifelse(is.na(error_text), "", error_text)
+    )
+  })
+  
+  manifest <- dplyr::bind_rows(rows)
+  
+  utils::write.csv(
+    manifest,
+    file.path(results_dir, "forecast_pdf_manifest.csv"),
+    row.names = FALSE
+  )
+  
+  n_ok   <- sum(manifest$success)
+  n_fail <- sum(!manifest$success)
+  
+  cat(
+    "\nForecast PDFs complete:",
+    n_ok, "saved,", n_fail, "failed\n"
+  )
+  
+  if (n_fail > 0L) {
+    cat("Failed files (not deleted):\n")
+    cat(manifest$file[!manifest$success], sep = "\n")
+  }
+  
+  invisible(manifest)
+}
+
+# =============================================================================
+# NATIVE MVGAM PLOTTING - INDIVIDUAL WINDOW PNG IMAGES
 # =============================================================================
 
 plot_mvgam_labels <- function(fc) {
   labels <- as.character(fc$series_names)
-  
-  if (!length(labels)) {
-    labels <- names(fc$forecasts)
-  }
-  
-  if (!length(labels)) {
-    stop("Cannot identify series in the mvgam forecast object.")
-  }
-  
+  if (!length(labels)) labels <- names(fc$forecasts)
+  if (!length(labels)) stop("Cannot identify series in the mvgam forecast object.")
   labels
 }
 
 plot_mvgam_image_names <- function(labels) {
   vapply(seq_along(labels), function(i) {
-    sprintf(
-      "series_%03d_%s.png",
-      i,
-      plot_safe_name(labels[i])
-    )
+    sprintf("series_%03d_%s.png", i, plot_safe_name(labels[i]))
   }, character(1))
 }
 
 plot_saved_mvgam_complete <- function(directory) {
   manifest_file <- file.path(directory, "manifest.csv")
-  
   if (!file.exists(manifest_file)) return(FALSE)
   
   previous <- tryCatch(
@@ -176,27 +302,18 @@ plot_draw_mvgam <- function(fc, series_index, filename) {
     stop("The mvgam package is required.")
   }
   
-  grDevices::png(
-    filename,
-    width = 1600,
-    height = 900,
-    res = 150
-  )
+  grDevices::png(filename, width = 1600, height = 900, res = 150)
   
   device <- grDevices::dev.cur()
   
   on.exit({
     devices <- grDevices::dev.list()
-    
     if (!is.null(devices) && device %in% devices) {
       grDevices::dev.off(which = device)
     }
   }, add = TRUE)
   
-  # Native S3 plotting method for mvgam_forecast.
-  # Uses the saved fitted-period draws, forecast draws, and observations.
   graphics::plot(fc, series = series_index)
-  
   invisible(NULL)
 }
 
@@ -204,44 +321,39 @@ plot_one_mvgam_file <- function(filename, overwrite = FALSE) {
   directory <- file.path(dirname(filename), "plots")
   plot_make_dir(directory)
   
-  # Avoid loading posterior arrays when previous plotting succeeded.
   if (!isTRUE(overwrite) && plot_saved_mvgam_complete(directory)) {
     return("existing")
   }
   
-  # Local function scope: this object is released when the function returns.
   fc <- readRDS(filename)
   
   if (!inherits(fc, "mvgam_forecast")) {
     stop("Saved object is not an mvgam_forecast: ", filename)
   }
   
-  labels <- plot_mvgam_labels(fc)
+  labels      <- plot_mvgam_labels(fc)
   image_names <- plot_mvgam_image_names(labels)
-  rows <- vector("list", length(labels))
+  rows        <- vector("list", length(labels))
   
   for (i in seq_along(labels)) {
-    image <- file.path(directory, image_names[i])
+    image      <- file.path(directory, image_names[i])
     error_text <- NA_character_
     
     success <- tryCatch({
-      # Regenerate when no complete successful manifest was found.
-      # This also retries series that failed in an earlier plotting pass.
       plot_draw_mvgam(fc, i, image)
       TRUE
     }, error = function(e) {
       error_text <<- conditionMessage(e)
-      
       if (file.exists(image)) unlink(image)
       FALSE
     })
     
     rows[[i]] <- tibble::tibble(
-      series = labels[i],
+      series       = labels[i],
       series_index = i,
-      filename = image_names[i],
-      success = success,
-      error = error_text
+      filename     = image_names[i],
+      success      = success,
+      error        = error_text
     )
   }
   
@@ -257,7 +369,7 @@ plot_one_mvgam_file <- function(filename, overwrite = FALSE) {
 }
 
 # =============================================================================
-# NATIVE FABLE PLOTTING
+# NATIVE FABLE PLOTTING - INDIVIDUAL WINDOW PNG IMAGES
 # =============================================================================
 
 plot_one_fable_file <- function(filename, record, results_dir,
@@ -283,13 +395,8 @@ plot_one_fable_file <- function(filename, record, results_dir,
     stop("Saved object is not a native fable: ", filename)
   }
   
-  train <- readRDS(
-    plot_resolve_file(results_dir, record$train_file)
-  )
-  
-  test <- readRDS(
-    plot_resolve_file(results_dir, record$test_file)
-  )
+  train <- readRDS(plot_resolve_file(results_dir, record$train_file))
+  test  <- readRDS(plot_resolve_file(results_dir, record$test_file))
   
   keys <- setdiff(tsibble::key_vars(fc), ".model")
   
@@ -299,22 +406,17 @@ plot_one_fable_file <- function(filename, record, results_dir,
   
   history <- tsibble::as_tsibble(
     tibble::as_tibble(train),
-    key = tidyselect::all_of(keys),
+    key   = tidyselect::all_of(keys),
     index = year
   )
   
-  # Native fable plotting retains the forecast distributions.
-  p <- ggplot2::autoplot(
-    fc,
-    history,
-    level = levels
-  ) +
+  p <- ggplot2::autoplot(fc, history, level = levels) +
     ggplot2::geom_point(
-      data = tibble::as_tibble(test),
-      mapping = ggplot2::aes(x = year, y = count),
+      data        = tibble::as_tibble(test),
+      mapping     = ggplot2::aes(x = year, y = count),
       inherit.aes = FALSE,
-      colour = "black",
-      size = 1.8
+      colour      = "black",
+      size        = 1.8
     ) +
     ggplot2::labs(
       subtitle = paste0(
@@ -328,13 +430,7 @@ plot_one_fable_file <- function(filename, record, results_dir,
     ggplot2::theme(legend.position = "bottom")
   
   tryCatch(
-    ggplot2::ggsave(
-      image,
-      plot = p,
-      width = 12,
-      height = 8,
-      dpi = 150
-    ),
+    ggplot2::ggsave(image, plot = p, width = 12, height = 8, dpi = 150),
     error = function(e) {
       if (file.exists(image)) unlink(image)
       stop(e)
@@ -345,7 +441,7 @@ plot_one_fable_file <- function(filename, record, results_dir,
 }
 
 # =============================================================================
-# DISK-BACKED FORECAST ORCHESTRATION
+# DISK-BACKED FORECAST ORCHESTRATION - PNG REPLOTTING
 # =============================================================================
 
 replot_disk_windows <- function(results, framework,
@@ -364,7 +460,7 @@ replot_disk_windows <- function(results, framework,
   
   for (window_key in names(windows)) {
     record <- windows[[window_key]]
-    files <- record$model_files %||% list()
+    files  <- record$model_files %||% list()
     
     if (!length(files)) {
       warning(
@@ -379,50 +475,34 @@ replot_disk_windows <- function(results, framework,
       error_text <- NA_character_
       
       status <- tryCatch({
-        filename <- plot_resolve_file(
-          results_dir,
-          files[[model_name]]
-        )
+        filename <- plot_resolve_file(results_dir, files[[model_name]])
         
         if (framework == "mvgam") {
-          plot_one_mvgam_file(
-            filename,
-            overwrite = overwrite
-          )
+          plot_one_mvgam_file(filename, overwrite = overwrite)
         } else {
           plot_one_fable_file(
-            filename,
-            record,
-            results_dir,
-            levels = levels,
-            overwrite = overwrite
+            filename, record, results_dir,
+            levels = levels, overwrite = overwrite
           )
         }
       }, error = function(e) {
         error_text <<- conditionMessage(e)
-        
-        warning(
-          window_key, " / ", model_name, ": ", error_text,
-          call. = FALSE
-        )
-        
+        warning(window_key, " / ", model_name, ": ", error_text, call. = FALSE)
         "failed"
       })
       
       rows[[length(rows) + 1L]] <- tibble::tibble(
-        window_key = window_key,
-        location = record$location %||% record$region %||% "joint",
-        framework = framework,
-        model = model_name,
-        test_start = record$test_start,
-        test_end = record$test_end,
+        window_key    = window_key,
+        location      = record$location %||% record$region %||% "joint",
+        framework     = framework,
+        model         = model_name,
+        test_start    = record$test_start,
+        test_end      = record$test_end,
         forecast_file = files[[model_name]],
-        status = status,
-        error = error_text
+        status        = status,
+        error         = error_text
       )
       
-      # Raw forecast and plot objects were local to plot_one_*().
-      # Collect them before loading the next saved forecast.
       gc(verbose = FALSE)
     }
   }
@@ -432,10 +512,7 @@ replot_disk_windows <- function(results, framework,
   if (nrow(manifest)) {
     utils::write.csv(
       manifest,
-      file.path(
-        results_dir,
-        paste0(framework, "_replot_manifest.csv")
-      ),
+      file.path(results_dir, paste0(framework, "_replot_manifest.csv")),
       row.names = FALSE
     )
   }
@@ -447,9 +524,9 @@ plot_mvgam_windows <- function(results, results_dir = "results",
                                overwrite = FALSE) {
   replot_disk_windows(
     results,
-    framework = "mvgam",
+    framework   = "mvgam",
     results_dir = results_dir,
-    overwrite = overwrite
+    overwrite   = overwrite
   )
 }
 
@@ -458,22 +535,22 @@ plot_fable_windows <- function(results, results_dir = "results",
                                overwrite = FALSE) {
   replot_disk_windows(
     results,
-    framework = "fable",
+    framework   = "fable",
     results_dir = results_dir,
-    levels = levels,
-    overwrite = overwrite
+    levels      = levels,
+    overwrite   = overwrite
   )
 }
 
 # =============================================================================
-# SKILL-PLOT DATA
+# SKILL-PLOT DATA PREPARATION
 # =============================================================================
 
 prepare_skill_plot_data <- function(metrics, framework) {
   if (!plot_has_rows(metrics)) return(tibble::tibble())
   
   model_column <- if (framework == "mvgam") "model" else ".model"
-  required <- c(model_column, "species", "test_start")
+  required     <- c(model_column, "species", "test_start")
   
   if (!all(required %in% names(metrics))) {
     stop(
@@ -489,9 +566,8 @@ prepare_skill_plot_data <- function(metrics, framework) {
   
   if (!length(skill_columns)) return(tibble::tibble())
   
-  df <- tibble::as_tibble(metrics)
-  df$plot_model <- as.character(df[[model_column]])
-  
+  df             <- tibble::as_tibble(metrics)
+  df$plot_model  <- as.character(df[[model_column]])
   df$plot_series <- if ("region" %in% names(df)) {
     paste(df$species, df$region, sep = " / ")
   } else {
@@ -500,13 +576,10 @@ prepare_skill_plot_data <- function(metrics, framework) {
   
   df |>
     dplyr::filter(plot_model != "baseline") |>
-    dplyr::select(
-      plot_model, plot_series, test_start,
-      all_of(skill_columns)
-    ) |>
+    dplyr::select(plot_model, plot_series, test_start, all_of(skill_columns)) |>
     tidyr::pivot_longer(
-      cols = all_of(skill_columns),
-      names_to = "metric",
+      cols      = all_of(skill_columns),
+      names_to  = "metric",
       values_to = "skill"
     ) |>
     dplyr::filter(is.finite(skill))
@@ -515,7 +588,7 @@ prepare_skill_plot_data <- function(metrics, framework) {
 skill_plot_theme <- function() {
   ggplot2::theme_minimal(base_size = 11) +
     ggplot2::theme(
-      legend.position = "bottom",
+      legend.position  = "bottom",
       panel.grid.minor = ggplot2::element_blank()
     )
 }
@@ -524,92 +597,56 @@ skill_plot_theme <- function() {
 # SKILL FIGURES - BOUNDED-SIZE BATCHES
 # =============================================================================
 
-save_skill_batch <- function(df, framework, results_dir,
-                             batch, total_batches) {
+save_skill_batch <- function(df, framework, results_dir, batch, total_batches) {
   labels <- c(
     crps_skill = "CRPS Skill",
     rmse_skill = "RMSE Skill",
-    rps_skill = "RPS Skill"
+    rps_skill  = "RPS Skill"
   )
   
-  # Individual metrics.
   for (metric_name in unique(df$metric)) {
-    part <- df |>
-      dplyr::filter(metric == metric_name)
+    part <- df |> dplyr::filter(metric == metric_name)
     
     p <- ggplot2::ggplot(
       part,
-      ggplot2::aes(
-        x = test_start,
-        y = skill,
-        colour = plot_model,
-        group = plot_model
-      )
+      ggplot2::aes(x = test_start, y = skill, colour = plot_model, group = plot_model)
     ) +
-      ggplot2::geom_hline(
-        yintercept = 0,
-        linetype = "dashed",
-        colour = "grey45"
-      ) +
+      ggplot2::geom_hline(yintercept = 0, linetype = "dashed", colour = "grey45") +
       ggplot2::geom_line(linewidth = 0.7) +
       ggplot2::geom_point(size = 1.7) +
       ggplot2::facet_wrap(~plot_series, scales = "free_y", ncol = 3) +
       ggplot2::labs(
-        title = paste(labels[[metric_name]], "Over Time -", framework),
-        x = "Test Start Year",
-        y = labels[[metric_name]],
+        title  = paste(labels[[metric_name]], "Over Time -", framework),
+        x      = "Test Start Year",
+        y      = labels[[metric_name]],
         colour = "Model"
       ) +
       skill_plot_theme()
     
-    stem <- paste0(
-      framework, "_",
-      sub("_skill$", "", metric_name),
-      "_skill_over_time"
-    )
+    stem <- paste0(framework, "_", sub("_skill$", "", metric_name), "_skill_over_time")
     
     ggplot2::ggsave(
-      file.path(
-        results_dir,
-        plot_batch_filename(stem, batch, total_batches)
-      ),
-      plot = p,
-      width = 12,
-      height = 7,
-      dpi = 150
+      file.path(results_dir, plot_batch_filename(stem, batch, total_batches)),
+      plot = p, width = 12, height = 7, dpi = 150
     )
     
     rm(p, part)
   }
   
-  # Combined metrics: each series has its own column.
   df$metric_label <- unname(labels[df$metric])
   
   p <- ggplot2::ggplot(
     df,
-    ggplot2::aes(
-      x = test_start,
-      y = skill,
-      colour = plot_model,
-      group = plot_model
-    )
+    ggplot2::aes(x = test_start, y = skill, colour = plot_model, group = plot_model)
   ) +
-    ggplot2::geom_hline(
-      yintercept = 0,
-      linetype = "dashed",
-      colour = "grey45"
-    ) +
+    ggplot2::geom_hline(yintercept = 0, linetype = "dashed", colour = "grey45") +
     ggplot2::geom_line(linewidth = 0.6) +
     ggplot2::geom_point(size = 1.3) +
-    ggplot2::facet_wrap(
-      ~metric_label + plot_series,
-      scales = "free_y",
-      ncol = 3
-    ) +
+    ggplot2::facet_wrap(~metric_label + plot_series, scales = "free_y", ncol = 3) +
     ggplot2::labs(
-      title = paste("Baseline-relative skill -", framework),
-      x = "Test Start Year",
-      y = "Skill",
+      title  = paste("Baseline-relative skill -", framework),
+      x      = "Test Start Year",
+      y      = "Skill",
       colour = "Model"
     ) +
     skill_plot_theme()
@@ -617,72 +654,45 @@ save_skill_batch <- function(df, framework, results_dir,
   ggplot2::ggsave(
     file.path(
       results_dir,
-      plot_batch_filename(
-        paste0(framework, "_all_skills_over_time"),
-        batch,
-        total_batches
-      )
+      plot_batch_filename(paste0(framework, "_all_skills_over_time"), batch, total_batches)
     ),
-    plot = p,
-    width = 12,
-    height = 10,
-    dpi = 150
+    plot = p, width = 12, height = 10, dpi = 150
   )
   
   rm(p)
   
-  # Best-model counts within each series, window, and metric.
   winners <- df |>
     dplyr::group_by(plot_series, test_start, metric_label) |>
     dplyr::slice_max(skill, n = 1, with_ties = TRUE) |>
     dplyr::ungroup() |>
-    dplyr::count(
-      plot_series, plot_model, metric_label,
-      name = "wins"
-    )
+    dplyr::count(plot_series, plot_model, metric_label, name = "wins")
   
-  p <- ggplot2::ggplot(
-    winners,
-    ggplot2::aes(
-      x = plot_series,
-      y = wins,
-      fill = plot_model
-    )
-  ) +
+  p <- ggplot2::ggplot(winners, ggplot2::aes(x = plot_series, y = wins, fill = plot_model)) +
     ggplot2::geom_col(position = "dodge") +
     ggplot2::facet_wrap(~metric_label, scales = "free_y") +
     ggplot2::labs(
-      title = paste("Windows with highest skill -", framework),
+      title    = paste("Windows with highest skill -", framework),
       subtitle = "Baseline excluded; ties count for every tied model",
-      x = "Series",
-      y = "Window wins",
-      fill = "Model"
+      x        = "Series",
+      y        = "Window wins",
+      fill     = "Model"
     ) +
     skill_plot_theme() +
-    ggplot2::theme(
-      axis.text.x = ggplot2::element_text(angle = 45, hjust = 1)
-    )
+    ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 45, hjust = 1))
   
   ggplot2::ggsave(
     file.path(
       results_dir,
-      plot_batch_filename(
-        paste0(framework, "_best_model_counts"),
-        batch,
-        total_batches
-      )
+      plot_batch_filename(paste0(framework, "_best_model_counts"), batch, total_batches)
     ),
-    plot = p,
-    width = 12,
-    height = 7,
-    dpi = 150
+    plot = p, width = 12, height = 7, dpi = 150
   )
   
   invisible(NULL)
 }
 
 plot_framework_skills <- function(metrics, framework,
-                                  results_dir = "results",
+                                  results_dir    = "results",
                                   series_per_batch = 6L) {
   if (length(series_per_batch) != 1L ||
       !is.numeric(series_per_batch) ||
@@ -709,26 +719,15 @@ plot_framework_skills <- function(metrics, framework,
     )
   }
   
-  series <- sort(unique(df$plot_series))
-  
-  batches <- split(
-    series,
-    ceiling(seq_along(series) / as.integer(series_per_batch))
-  )
+  series  <- sort(unique(df$plot_series))
+  batches <- split(series, ceiling(seq_along(series) / as.integer(series_per_batch)))
   
   for (i in seq_along(batches)) {
-    part <- df |>
-      dplyr::filter(plot_series %in% batches[[i]])
+    part <- df |> dplyr::filter(plot_series %in% batches[[i]])
     
     plot_attempt(
       paste(framework, "skill batch", i),
-      save_skill_batch(
-        part,
-        framework,
-        results_dir,
-        batch = i,
-        total_batches = length(batches)
-      )
+      save_skill_batch(part, framework, results_dir, batch = i, total_batches = length(batches))
     )
     
     rm(part)
@@ -738,78 +737,66 @@ plot_framework_skills <- function(metrics, framework,
   invisible(NULL)
 }
 
-plot_mvgam_results <- function(metrics, results_dir = "results",
-                               series_per_batch = 6L) {
-  plot_framework_skills(
-    metrics,
-    framework = "mvgam",
-    results_dir = results_dir,
-    series_per_batch = series_per_batch
-  )
+plot_mvgam_results <- function(metrics, results_dir = "results", series_per_batch = 6L) {
+  plot_framework_skills(metrics, framework = "mvgam", results_dir = results_dir,
+                        series_per_batch = series_per_batch)
 }
 
-plot_fable_results <- function(metrics, results_dir = "results",
-                               series_per_batch = 6L) {
-  plot_framework_skills(
-    metrics,
-    framework = "fable",
-    results_dir = results_dir,
-    series_per_batch = series_per_batch
-  )
+plot_fable_results <- function(metrics, results_dir = "results", series_per_batch = 6L) {
+  plot_framework_skills(metrics, framework = "fable", results_dir = results_dir,
+                        series_per_batch = series_per_batch)
 }
 
 # =============================================================================
-# MAIN ENTRY POINT - COMPATIBLE WITH main.R
+# MAIN ENTRY POINT - CALLED FROM main.R [1]
 # =============================================================================
 
 generate_plots <- function(results, config, data = NULL,
                            results_dir = "results") {
   plot_make_dir(results_dir)
   
-  options <- config$plots %||% list()
+  options          <- config$plots %||% list()
   series_per_batch <- options$series_per_batch %||% 6L
-  overwrite <- isTRUE(options$overwrite %||% FALSE)
+  overwrite        <- isTRUE(options$overwrite %||% FALSE)
   
+  # --- Skill plots ---
   for (framework in c("mvgam", "fable")) {
     metrics <- results[[framework]]$metrics
     
     if (plot_has_rows(metrics)) {
       plot_attempt(
         paste(framework, "skill plotting"),
-        plot_framework_skills(
-          metrics,
-          framework,
-          results_dir,
-          series_per_batch = series_per_batch
-        )
+        plot_framework_skills(metrics, framework, results_dir,
+                              series_per_batch = series_per_batch)
       )
     }
   }
   
-  # The latest main.R passes FALSE for both options below because
-  # evaluation.R already creates native plots while fitting each window.
-  #
-  # Enable these options for a separate plotting-only regeneration pass.
+  # --- PNG replotting (optional; evaluation.R already generates these) ---
   if (isTRUE(options$native_mvgam %||% FALSE)) {
     plot_attempt(
       "Native mvgam replotting",
-      plot_mvgam_windows(
-        results,
-        results_dir,
-        overwrite = overwrite
-      )
+      plot_mvgam_windows(results, results_dir, overwrite = overwrite)
     )
   }
   
   if (isTRUE(options$native_fable %||% FALSE)) {
     plot_attempt(
       "Native fable replotting",
-      plot_fable_windows(
-        results,
-        results_dir,
-        levels = options$interval_levels %||% c(80, 95),
-        overwrite = overwrite
-      )
+      plot_fable_windows(results, results_dir,
+                         levels    = options$interval_levels %||% c(80, 95),
+                         overwrite = overwrite)
+    )
+  }
+  
+  # --- Forecast PDFs (default ON) ---
+  # Loads each saved forecast.rds, renders all series as pages in a PDF,
+  # then deletes the .rds to reclaim disk space.
+  # Set plots$generate_forecast_pdfs: false in config.yml to skip.
+  if (isTRUE(options$generate_forecast_pdfs %||% TRUE)) {
+    plot_attempt(
+      "Forecast PDF generation",
+      generate_forecast_pdfs(results_dir)
     )
   }
   
