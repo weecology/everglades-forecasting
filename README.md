@@ -66,28 +66,34 @@ remotes::install_github("hendersontrent/fable.gam") #Fable GAMs
 ├── data_functions.R                # Data loading, aggregation, and caching
 ├── evaluation.R                    # Cross-validation and metrics
 ├── plotting.R                      # Visualization functions
-├── final_year_plots.R              # Forecast vs actual for latest year
+├── generate_forecast_pdfs.R        # Forecast PDF generation and .rds cleanup
 ├── cache/                          # Auto-generated data/model cache folder
 ├── models/
-│   ├── mvgam_baseline.R           # Baseline longterm average model
-│   ├── mvgam_ar.R                 # AR model with smooth water covariates
-│   ├── mvgam_ar_exog.R            # AR with linear covariates
-│   ├── mvgam_ar_exog_plus.R       # AR with tensor product interactions
-│   ├── mvgam_species_specific.R   # Species-specific smooth responses
-│   ├── mvgam_trait.R              # Trait-weighted covariate effects
-│   ├── mvgam_trait2.R             # Traits + guilds + body size
-│   └── fable_models.R             # ARIMA, TSLM, ARIMA-exog, GAM
+│   ├── mvgam_baseline.R            # Baseline longterm average model
+│   ├── mvgam_ar.R                  # AR model with smooth water covariates
+│   ├── mvgam_ar_exog.R             # AR with linear covariates
+│   ├── mvgam_ar_exog_plus.R        # AR with tensor product interactions
+│   ├── mvgam_species_specific.R    # Species-specific smooth responses
+│   ├── mvgam_trait.R               # Trait-weighted covariate effects
+│   ├── mvgam_trait2.R              # Traits + guilds + body size
+│   └── fable_models.R              # ARIMA, TSLM, ARIMA-exog, GAM
 └── results/
-    ├── run_all_YYYYMMDD-HHMM/
-│       ├── forecast_results.rds
-│       ├── config.rds
-│       ├── mvgam_crps_skill_over_time.png
-│       ├── mvgam_rps_skill_over_time.png
-│       ├── mvgam_best_model_counts.png
-│       └── forecasts/
-│           ├── mvgam_gbhe_trait.png
-│           ├── mvgam_Total_ar_exog.png    # If forecast_totals = true
-│           └── ... (all species × models)
+    └── <run_folder>/
+        ├── forecast_results.rds
+        ├── metrics_only.rds
+        ├── config.rds
+        ├── forecast_pdf_manifest.csv
+        ├── mvgam_crps_skill_over_time.png
+        ├── mvgam_rps_skill_over_time.png
+        ├── mvgam_best_model_counts.png
+        └── windows/
+            └── <location>_<test_year>/
+                ├── train_data.rds
+                ├── test_data.rds
+                └── mvgam/
+                    └── <model>/
+                        ├── forecast.pdf   # Native forecast plots
+                        └── metrics.rds
 ```     
     
     
