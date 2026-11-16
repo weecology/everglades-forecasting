@@ -4,25 +4,6 @@
 # Computes per-window skill delta: skill_system_t - skill_subregion_t
 # Works for both species-level and total count forecasting modes
 # =============================================================================
-# # HiPerGator-specific fix for module conflicts
-# if (dir.exists("/apps")) {
-#   # Manually load UDUNITS without needing the module 'loaded' in the shell
-#   if (file.exists("/apps/udunits/2.2.17/lib/libudunits2.so.0")) {
-#     dyn.load("/apps/udunits/2.2.17/lib/libudunits2.so.0")
-#   }
-#
-#   # Manually load GDAL to bypass the Lmod conflict with R/4.6
-#   gdal_path <- "/apps/gcc/12.2.0/gdal/3.9.0/lib/libgdal.so"
-#   if (file.exists(gdal_path)) {
-#     dyn.load(gdal_path)
-#   }
-# }
-#
-# .libPaths("~/R/libs")
-# library('units')
-# library('sf')
-# library('stars')
-# =============================================================================
 library(dplyr)
 library(ggplot2)
 library(patchwork)
@@ -31,28 +12,25 @@ library(ggExtra)
 library(ggside)
 library(glue)
 library(stringr)
+library(mvgam)
+library(fabletools)
 library(conflicted)
 conflicted::conflicts_prefer(dplyr::filter, .quiet = TRUE)
 conflicted::conflicts_prefer(dplyr::select, .quiet = TRUE)
-
 source("data_functions.R")
-
 # =============================================================================
 # CONFIGURATION - EDIT THIS SECTION
 # =============================================================================
 SPECIES_TO_RUN   <- "top6"
 FORECAST_TOTALS  <- FALSE
-SCALES_TO_RUN    <- c("system", "subregion") #c("system", "subregion", "colony") 
+SCALES_TO_RUN    <- c("system", "subregion") #c("system", "subregion", "colony")
 FABLE_MODELS     <- c()
 # c("arima", "tslm", "arima_exog", "gam")
-MVGAM_MODELS     <- c('ar', 'ar_exog') 
+MVGAM_MODELS     <- c('ar', 'ar_exog')
 # c('ar', 'ar_exog', 'ar_exog_plus', 'trait', 'species_specific', 'trait2')
 PARALLEL         <- FALSE
 PARALLEL_WORKERS <- 3
 FORECAST_HORIZON  <- 2
-
-
-
 # =============================================================================
 # SERIAL PRECOMPUTE OF ALL SHARED ARTIFACTS
 # =============================================================================
@@ -73,7 +51,6 @@ tryCatch({
   get_data_water()
   cat("  ✓ Water covariate data cached\n")
 }, error = function(e) warning("Water data pre-cache failed: ", e$message))
-
 cat("  Pre-caching wading bird data...\n")
 tryCatch({
   tmp_cfg <- config::get(config = "run_all_scales_all")
@@ -85,15 +62,12 @@ tryCatch({
     cat(glue("  ✓ Wading bird data cached for scale: {sc}\n"))
   }
 }, error = function(e) warning("Wading bird data pre-cache failed: ", e$message))
-
 dir.create("cache", showWarnings = FALSE, recursive = TRUE)
 cat("✓ All shared artifacts precomputed — safe to start parallel workers\n\n")
-
 # =============================================================================
 # SOURCE PARALLEL UTILITIES
 # =============================================================================
 source("parallel_utils.R")
-
 # =============================================================================
 # HELPER: extract start year from window label or test_start
 # =============================================================================
@@ -106,7 +80,6 @@ extract_window_start_year <- function(window_vec, test_start_vec = NULL) {
   if (any(!is.na(yr))) return(yr)
   suppressWarnings(as.integer(as.character(window_vec)))
 }
-
 # =============================================================================
 # CREATE TIMESTAMPED SCALE_RUN FOLDER
 # =============================================================================
@@ -119,13 +92,11 @@ scale_run_folder <- file.path(
   paste0(species_str, "_model_scale_run_", all_models_str, "_", all_scales_str, "-", timestamp)
 )
 dir.create(scale_run_folder, recursive = TRUE, showWarnings = FALSE)
-
 cat("\n")
 cat(paste(rep("=", 80), collapse = ""), "\n")
 cat("MODEL-BY-MODEL SPATIAL SCALE COMPARISON\n")
 cat(paste(rep("=", 80), collapse = ""), "\n")
 cat("Results folder:", scale_run_folder, "\n\n")
-
 # =============================================================================
 # LOAD BASE CONFIGURATION AND APPLY USER SETTINGS
 # =============================================================================
@@ -139,8 +110,9 @@ base_config$models$fable            <- FABLE_MODELS
 base_config$run_mvgam               <- length(MVGAM_MODELS) > 0
 base_config$run_fable               <- length(FABLE_MODELS) > 0
 base_config$forecast_horizon        <- FORECAST_HORIZON
+# Disable individual PDF generation at the main.R level since we aggregate it here
+base_config$plots$generate_forecast_pdfs <- FALSE 
 saveRDS(base_config, file.path(scale_run_folder, "base_config.rds"))
-
 cat("📋 Configuration:\n")
 cat("  • Species:",         paste(SPECIES_TO_RUN, collapse = ", "), "\n")
 cat("  • Forecast totals:", FORECAST_TOTALS, "\n")
@@ -150,7 +122,6 @@ cat("  • fable models:",    if (length(FABLE_MODELS) > 0) paste(FABLE_MODELS, 
 cat("  • Parallel:",        PARALLEL, "\n")
 if (PARALLEL) cat("  • Workers:", PARALLEL_WORKERS, "\n")
 cat("✓ Base configuration saved\n\n")
-
 # =============================================================================
 # BUILD MODEL LIST
 # =============================================================================
@@ -165,11 +136,9 @@ if (base_config$run_fable) {
 }
 if (length(models_to_test) == 0)
   stop("!!!! - No models specified! Please add models to MVGAM_MODELS or FABLE_MODELS")
-
 cat("📋 Models to test:", length(models_to_test), "\n")
 for (mk in names(models_to_test)) cat("  •", mk, "\n")
 cat("\n")
-
 # =============================================================================
 # PART 1: RUN EACH MODEL ACROSS ALL SCALES
 # =============================================================================
@@ -306,7 +275,6 @@ run_single_model <- function(model_key) {
   
   return(model_scale_results)
 }
-
 # -----------------------------------------------------------------------------
 # Run models — parallel or sequential
 # -----------------------------------------------------------------------------
@@ -321,12 +289,10 @@ if (PARALLEL) {
   names(all_model_results) <- names(models_to_test)
 }
 cat("\n✅ ALL MODEL RUNS COMPLETE!\n\n")
-
 # =============================================================================
 # PART 2: EXTRACT PER-WINDOW SKILL AND COMPUTE SCALE DELTAS
 # =============================================================================
 cat("📊 Extracting per-window skill scores and computing scale deltas...\n\n")
-
 extract_model_metrics <- function(folder_path, scale_name, framework) {
   file_path <- file.path(folder_path, "forecast_results.rds")
   if (!file.exists(file_path)) return(NULL)
@@ -362,7 +328,6 @@ extract_model_metrics <- function(folder_path, scale_name, framework) {
     ) |>
     mutate(framework = framework, scale = scale_name)
 }
-
 all_window_metrics <- bind_rows(lapply(names(all_model_results), function(model_key) {
   model_info    <- models_to_test[[model_key]]
   framework     <- model_info$framework
@@ -377,7 +342,6 @@ all_window_metrics <- bind_rows(lapply(names(all_model_results), function(model_
     m |> filter(model == model_name) |> mutate(model_key = model_key)
   }))
 }))
-
 if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
   warning("No window-level metrics found. Skipping delta computation.")
 } else {
@@ -837,6 +801,112 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
   cat("  ✓ Saved: all_models_summary.csv\n")
 }
 
+# ===========================================================================
+# PART 4: GENERATE COMBINED FORECAST PDF & CLEANUP
+# ===========================================================================
+cat("\n📑 Generating combined forecast PDF...\n")
+
+# Find all forecast.rds files
+rds_files <- list.files(
+  path       = scale_run_folder,
+  pattern    = "^forecast\\.rds$",
+  recursive  = TRUE,
+  full.names = TRUE
+)
+
+if (length(rds_files) > 0) {
+  combined_pdf <- file.path(scale_run_folder, "all_models_forecasts.pdf")
+  
+  # Start PDF device
+  pdf(combined_pdf, width = 12, height = 8)
+  
+  pdf_success <- tryCatch({
+    for (i in seq_along(rds_files)) {
+      rds_path <- rds_files[i]
+      
+      # Extract metadata from the path relative to scale_run_folder:
+      # e.g., "mvgam_ar/subregion/windows/1_2024/mvgam/ar_exog/forecast.rds"
+      model_dir     <- dirname(rds_path) 
+      framework_dir <- dirname(model_dir) 
+      window_dir    <- dirname(framework_dir) 
+      
+      model_name  <- basename(model_dir)
+      framework   <- basename(framework_dir)
+      window_name <- basename(window_dir)
+      
+      # The scale is two levels up from the "windows" folder
+      scale     <- basename(dirname(dirname(window_dir))) 
+      model_key <- basename(dirname(dirname(dirname(window_dir))))
+      
+      cat(sprintf("  [%d/%d] Plotting %s | %s | %s\n", i, length(rds_files), model_key, scale, window_name))
+      
+      fc <- readRDS(rds_path)
+      
+      if (inherits(fc, "mvgam_forecast")) {
+        labels <- as.character(fc$series_names)
+        if (!length(labels)) labels <- names(fc$forecasts)
+        
+        for (s in seq_along(labels)) {
+          # Capture the plot object
+          p <- plot(fc, series = s)
+          
+          title_str <- glue::glue("Scale: {scale} | Window: {window_name} | Model: {model_name} | Series: {labels[s]}")
+          
+          # If mvgam returned a ggplot object, we must explictly add the title and print() it.
+          if (inherits(p, "ggplot")) {
+            p <- p + ggtitle(title_str) + theme(plot.title = element_text(size = 11, face = "bold"))
+            print(p)
+          } else {
+            # Fallback if mvgam returns base graphics (unlikely given your example, but safe to include)
+            mtext(title_str, side = 3, line = 0.5, cex = 0.8)
+          }
+        }
+      } else if (inherits(fc, "fbl_ts")) {
+        # Fallback in case there are fable forecasts to plot 
+        train_rds <- file.path(window_dir, "train_data.rds")
+        if (file.exists(train_rds)) {
+          history <- readRDS(train_rds)
+          keys <- setdiff(tsibble::key_vars(fc), ".model")
+          history <- tsibble::as_tsibble(tibble::as_tibble(history), key = all_of(keys), index = year)
+          
+          p <- autoplot(fc, history, level = c(80, 95)) +
+            ggtitle(glue::glue("Scale: {scale} | Window: {window_name} | Model: {model_name}")) +
+            theme_classic(base_size = 12) +
+            theme(legend.position = "bottom", plot.title = element_text(size = 11, face = "bold"))
+          
+          if (length(keys) > 0) p <- p + facet_wrap(vars(!!!syms(keys)), scales = "free_y")
+          print(p)
+        }
+      }
+    }
+    TRUE
+  }, error = function(e) {
+    warning("Error generating PDF: ", e$message)
+    FALSE
+  })
+  
+  dev.off()
+  
+  # Cleanup large files if PDF was strictly successful
+  if (pdf_success && file.exists(combined_pdf) && file.info(combined_pdf)$size > 0) {
+    cat("  ✓ Combined PDF saved successfully. Removing raw .rds files to save space...\n")
+    
+    file.remove(rds_files)
+    
+    # Also clean up the train/test data .rds files inside the windows folders as they take up space
+    input_rds <- list.files(scale_run_folder, pattern = "^(train_data|test_data)\\.rds$", recursive = TRUE, full.names = TRUE)
+    file.remove(input_rds)
+    
+    cat(glue::glue("  ✓ Removed {length(rds_files) + length(input_rds)} raw .rds files.\n"))
+  } else {
+    cat("  ✗ PDF generation failed or file is empty. Retaining .rds files for debugging.\n")
+  }
+  
+} else {
+  cat("  ℹ No forecast.rds files found to plot.\n")
+}
+
+
 # =============================================================================
 # FINAL SUMMARY
 # =============================================================================
@@ -851,7 +921,9 @@ cat("  • window_skill_all_scales.csv       - Per-window skill scores (all mode
 cat("  • all_models_window_delta.png       - Cross-model delta plot with ggside marginal\n")
 cat("  • all_models_window_delta.csv       - Cross-model delta table\n")
 cat("  • all_models_summary.csv            - Aggregated summary across windows\n")
-cat("  • window_delta_marginal/            - ggExtra per-panel marginal plots\n\n")
+cat("  • window_delta_marginal/            - ggExtra per-panel marginal plots\n")
+cat("  • all_models_forecasts.pdf          - Single PDF containing all forecasting plots\n\n")
+
 for (model_key in names(all_model_results)) {
   cat(glue("  • {model_key}/\n"))
   cat(glue("    \u251c\u2500\u2500 window_skill_by_scale.png  - Skill per window by scale\n"))
@@ -859,13 +931,10 @@ for (model_key in names(all_model_results)) {
   cat(glue("    \u251c\u2500\u2500 window_delta_skill.csv     - Delta table\n"))
   for (scale in SCALES_TO_RUN) cat(glue("    \u251c\u2500\u2500 {scale}/\n"))
 }
-
-
 # =============================================================================
 # ZIP results folder if on HiPerGator blue
 # =============================================================================
-on_hipergator <- dir.exists("/blue/ewhite") 
-
+on_hipergator <- dir.exists("/blue/ewhite")
 if (on_hipergator) {
   zip_path <- paste0(scale_run_folder, ".zip")
   cat("\n📦 Zipping results folder...\n")
