@@ -18,6 +18,7 @@ mkdir -p /blue/ewhite/alexanderblochel/logs
 source /etc/profile.d/modules.sh || exit 1
 module load R/4.6
 export R_LIBS_USER=/blue/ewhite/alexanderblochel/R/libs
+export LD_PRELOAD="/blue/ewhite/alexanderblochel/R/poppler/lib/libjpeg.so.8${LD_PRELOAD:+:$LD_PRELOAD}"
 
 # --- Stan cache (dont do compile model everytime within moving window) ---
 export CMDSTAN_CACHE=/blue/ewhite/alexanderblochel/.cmdstan_cache
