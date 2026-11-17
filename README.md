@@ -48,6 +48,7 @@ install.packages(c(
   "future",        # Parallel processing
   "furrr",         # Parallel mapping
   "digest"         # Caching
+  "pdftools"       # Save all forecasts to pdf
 ))
 
 # Install from GitHub
@@ -95,7 +96,20 @@ remotes::install_github("hendersontrent/fable.gam") #Fable GAMs
                         ├── forecast.pdf   # Native forecast plots
                         └── metrics.rds
 ```     
-    
+ ### Forecast horizon
+
+In the current `main.R`, an explicit `forecast_horizon` overrides `test_years`.
+
+Both frameworks forecast the complete held-out test window. For annual data, a horizon of `2` means two forecast years per CV window.
+
+These are cross-validation forecasts, not additional forecasts beyond the latest observation year.
+
+The wrapper can override the horizon:
+
+```r
+FORECAST_HORIZON <- 2
+base_config$forecast_horizon <- FORECAST_HORIZON
+```   
     
 ## Workflow
 
@@ -277,8 +291,159 @@ default:
   samples: 1500                   # MCMC sampling iterations
 ```
     
-    
-    
+  ### Testing one window
+
+The pipeline does not retain every window's posterior draws in memory.
+
+```text
+Load configuration and prepared data
+    ↓
+Select one CV window
+    ↓
+Save train_data.rds and test_data.rds
+    ↓
+For each selected model:
+    Fit model
+    Generate held-out forecast
+    Save forecast.rds
+    Optionally generate native PNG plots
+    Extract small predictions and metrics
+    Release the raw forecast object
+    ↓
+Proceed to the next window
+    ↓
+Save lightweight combined results and metrics_only.rds
+    ↓
+Run cross-scale comparisons
+    ↓
+Build one combined forecast PDF
+    ↓
+Validate PDF pages and labels
+    ↓
+Optionally delete processed raw forecasts and window inputs
+```
+
+Each model function retains its existing return format:
+
+```r
+list(fc = fc, crps = crps)
+```
+
+The returned `window_objects` records contain metadata and relative file paths rather than full posterior arrays.
+
+Saving to disk reduces accumulation across windows, but an individual Stan fit and prediction calculation can still require substantial memory.
+
+### Window directory structure
+
+Before cleanup:
+
+```text
+<model>/<scale>/windows/
+└── <location>_<first_test_year>/
+    ├── train_data.rds
+    ├── test_data.rds
+    └── mvgam/
+        ├── metadata.rds
+        ├── predictions.rds
+        ├── metrics.rds
+        ├── baseline/
+        │   ├── forecast.rds
+        │   └── plots/
+        └── ar_exog/
+            ├── forecast.rds
+            └── plots/
+```
+
+For example, `1_2024` identifies spatial unit `1` and a forecast window beginning in 2024.
+
+Fable forecasts are saved under the window's `fable/` directory. Their saved layout can differ because one fable object may contain multiple models and series.  
+
+## Combined Forecast PDF
+
+The wrapper's final PDF stage creates:
+
+```text
+<scale_run_folder>/all_models_forecasts.pdf
+```
+
+The PDF is saved alongside the cross-model and cross-scale comparison figures.
+
+It contains one page per saved model/series forecast, covering the available models, species, regions, spatial scales, and windows.
+
+Pages are labelled with:
+
+```text
+Scale | Window | Model | Series
+```  
+
+### Fable pages
+
+## Verified Cleanup
+
+The final PDF section contains:
+
+```r
+DELETE_RAW_AFTER_VALIDATION <- TRUE
+```
+
+Set it to `FALSE` for the first test to retain source data while inspecting the combined PDF.
+
+When enabled, cleanup deletes only:
+
+- The processed `forecast.rds` files
+- Their associated `train_data.rds` files
+- Their associated `test_data.rds` files
+
+Cleanup retains:
+
+- `forecast_results.rds`
+- `metrics_only.rds`
+- Configuration files
+- Window metadata
+- Small prediction and metric tables
+- Comparison figures and CSV summaries
+- The combined PDF and manifests
+- Existing PNG plots
+
+**This is not a blanket deletion of all `.rds` files or every large file.**
+
+Deletion results and estimated reclaimed space are recorded in:
+
+```text
+forecast_cleanup_manifest.csv
+```
+
+After cleanup, raw forecast paths in the saved metadata refer to removed files. The PDF preserves figures, not predictive draws or fitted models.
+
+Consequently, the removed forecast distributions cannot be rescored or replotted from the PDF alone. Retain a separate backup if further posterior analysis is needed.
+
+## Final Results Structure
+
+```text
+results/
+└── top6_model_scale_run_<models>_<scales>-<timestamp>/
+    ├── all_models_forecasts.pdf
+    ├── forecast_pdf_manifest.csv
+    ├── forecast_cleanup_manifest.csv
+    ├── base_config.rds
+    ├── window_skill_all_scales.csv
+    ├── all_models_window_delta.png
+    ├── all_models_window_delta.csv
+    ├── all_models_summary.csv
+    ├── all_models_delta_density.png
+    ├── all_models_delta_ecdf.png
+    ├── all_models_delta_violin.png
+    ├── window_delta_marginal/
+    ├── mvgam_ar/
+    │   ├── window_skill_by_scale.png
+    │   ├── window_delta_skill.png
+    │   ├── window_delta_skill.csv
+    │   ├── system/
+    │   └── subregion/
+    └── mvgam_ar_exog/
+        ├── system/
+        └── subregion/
+```
 
 ## Running on HiPerGator
 
@@ -311,3 +476,41 @@ You do not need to reinstall packages on the compute node. If a package is missi
 ### 4. Retrieve results
 
 On HiPerGator, the final block of `run_all_scales.R` creates a `.zip` archive of `scale_run_folder` for Globus transfer and removes the original results folder. Check that the archive exists and contains the expected files. This archiving step is skipped when running locally.
+
+### Retrieve results
+
+The current wrapper creates a ZIP archive on HiPerGator and removes the original scale-run directory afterward.
+
+Before relying on that removal step, verify that archive creation succeeded and that the archive contains the combined PDF, manifests, configurations, and comparison outputs. A non-empty ZIP alone does not establish completeness.
+
+## Troubleshooting
+
+### Empty forecast PDFs
+
+Explicitly print returned ggplot/patchwork objects inside loops. Do not delete raw forecasts based only on a PDF's file size.
+
+Use the combined PDF's page-count and label validation.
+
+### Missing raw forecasts
+
+Older individual-PDF cleanup may already have removed `forecast.rds` files. An empty PDF cannot reconstruct the original predictive draws.
+
+### Out-of-memory termination
+
+Keep posterior forecasts on disk and load one model at a time. Avoid accumulating full forecast objects across windows.
+
+Use separate metrics files during post-processing, keep outer parallelism modest, and allocate enough memory for the largest individual fit.
+
+### Extreme forecast intervals
+
+Successful sampling does not guarantee convergence or reliable predictions. Inspect sampling diagnostics, predictive tails, covariate extrapolation, and the adequacy of the training window.
+
+Do not treat `type = "response"` as a general solution to extreme forecast values.
+
+### Package-loading failures
+
+Install or repair packages using the same R version and shared library used by the batch job.
+
+### Data updates and prepared caches
+
+Refreshing source observations or water data must also invalidate affected prepared-data caches. Otherwise, the pipeline can continue using an older cached dataset.
