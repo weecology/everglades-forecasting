@@ -50,7 +50,7 @@ cran_packages <- c(
   "digest", "dplyr", "tidyr", "readr", "tsibble", "zoo",
   
   # Visualization
-  "ggplot2", "patchwork", "stringr", "glue", "ggExtra", "ggside",
+  "ggplot2", "patchwork", "stringr", "glue", "ggExtra", "ggside", 'pdftools',
   
   # Modeling
   "mvgam", "distributional", "verification", "fable", "feasts",
