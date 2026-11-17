@@ -15,8 +15,8 @@ fit_mvgam_baseline <- function(train_data, test_data, config) {
   
   n_series <- length(unique(train_data$series))
   
-  baseline_formula <- if (n_series > 1) {
-    count ~ -1 + series
+  baseline_formula <- if (CONFIG$spatial$forecast_totals == TRUE) {                  #this needs to be different.... if species >1 then have +series but not if running individual species... 
+    count ~ -1 + series                                                              # this goes in formula, if I can figure it out.... 
   } else {
     count ~ 1
   }
@@ -26,7 +26,7 @@ fit_mvgam_baseline <- function(train_data, test_data, config) {
   
   tryCatch({
     model <- mvgam(
-      formula  = baseline_formula,
+      formula  = count ~ 1,
       data     = train_data,
       #newdata  = test_data,
       family   = model_family,

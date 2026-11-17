@@ -17,7 +17,7 @@
 #   }
 # }
 #
-# # Load the personal library path defined in your setup [2]
+# # Load the personal library path defined in your setup
 # .libPaths("~/R/libs")
 # library('units')
 # library('sf')
@@ -27,6 +27,7 @@ library(dplyr)
 library(mvgam)
 library(glue)
 library(future)
+
 # Handle namespace conflicts for the test harness
 conflicted::conflicts_prefer(dplyr::filter,   .quiet = TRUE)
 conflicted::conflicts_prefer(dplyr::select,   .quiet = TRUE)
@@ -35,9 +36,11 @@ conflicted::conflicts_prefer(mvgam::VAR,      .quiet = TRUE)
 conflicted::conflicts_prefer(mvgam::RW,       .quiet = TRUE)
 conflicted::conflicts_prefer(base::as.matrix, .quiet = TRUE)
 conflicted::conflicts_prefer(base::get,       .quiet = TRUE)
+
 # Load necessary functions
 source("data_functions.R")
 source("evaluation.R")
+
 # =============================================================================
 # CONFIGURATION FOR TESTING
 # =============================================================================
@@ -87,11 +90,14 @@ TEST_CONFIG <- list(
   # Data type
   data_type = "observed"
 )
+
 # Make it globally available
 CONFIG <- TEST_CONFIG
+
 # =============================================================================
 # TEST FUNCTIONS
 # =============================================================================
+
 #' Test one or more models in isolation
 #' @param model_name Name(s) of the model(s) (e.g., "baseline", "ar", "trait",
 #'   or c("baseline", "ar") to compare multiple models in the same CV windows)
@@ -123,7 +129,21 @@ test_single_model <- function(model_name,
   
   cat(glue("Data: {nrow(data)} rows, {n_distinct(data$species)} species\n\n"))
   
-  # Load the specific model file(s) — now supports a vector of model names
+  # === FIX: CREATE A TEST RUN FOLDER AND INJECT INTO CONFIG ===
+  test_run_folder <- file.path("results", paste0(
+    "test_", framework, "_", paste(model_name, collapse = "_"), "_", 
+    format(Sys.time(), "%Y%m%d-%H%M%S")
+  ))
+  dir.create(test_run_folder, recursive = TRUE, showWarnings = FALSE)
+  CONFIG$output_dir <- test_run_folder
+  
+  # Make it globally available for the evaluation script
+  assign("CONFIG", CONFIG, envir = .GlobalEnv)
+  assign("run_folder", test_run_folder, envir = .GlobalEnv)
+  
+  cat("Test output directory:", test_run_folder, "\n\n")
+  
+  # Load the specific model file(s)
   if (framework == "mvgam") {
     for (m in model_name) {
       model_file <- file.path("models", paste0("mvgam_", m, ".R"))
@@ -135,10 +155,9 @@ test_single_model <- function(model_name,
     }
     cat("\n")
     
-    # Run the model(s) through CV with dynamic parallel arguments and wrapper fix
+    # Run the model(s) through CV with explicit config and framework
     results <- fit_sliding_window(
       data = data,
-      # --- WRAPPER FOR PARALLEL WORKERS ---
       make_forecast = function(train, test, ...) {
         source("evaluation.R", local = FALSE)
         source(file.path("models", "mvgam_baseline.R"), local = FALSE)
@@ -147,12 +166,13 @@ test_single_model <- function(model_name,
         }
         make_mvgam_forecasts(train, test, ...)
       },
-      # ------------------------------------
       train_years = CONFIG$train_years,
       test_years = CONFIG$test_years,
       cv_windows = CONFIG$cv_windows,
       parallel = parallel,
       workers = workers,
+      framework = framework,         # REQUIRED BY NEW EVALUATION
+      config = CONFIG,               # REQUIRED BY NEW EVALUATION
       models_to_run = model_name,
       use_ordinal = CONFIG$use_ordinal,
       precomputed_breaks = NULL
@@ -164,18 +184,18 @@ test_single_model <- function(model_name,
     
     results <- fit_sliding_window(
       data = data,
-      # --- WRAPPER FOR PARALLEL WORKERS ---
       make_forecast = function(train, test, ...) {
         source("evaluation.R", local = FALSE)
         source("models/fable_models.R", local = FALSE)
         make_fable_forecasts(train, test, ...)
       },
-      # ------------------------------------
       train_years = CONFIG$train_years,
       test_years = CONFIG$test_years,
       cv_windows = CONFIG$cv_windows,
       parallel = parallel,
       workers = workers,
+      framework = framework,         
+      config = CONFIG,              
       models_to_run = model_name,
       use_ordinal = CONFIG$use_ordinal
     )
@@ -195,6 +215,7 @@ test_single_model <- function(model_name,
   
   return(results)
 }
+
 #' Test with a single CV window and custom train/test split
 #' @param train_start First year of training data
 #' @param test_start First year of test data
@@ -240,12 +261,17 @@ test_single_window <- function(model_name,
       ) |>
       as.data.frame()
     
+    # Mock window directory needed by updated evaluation.R
+    CONFIG$.window_dir <- tempdir()
+    CONFIG$.window_relative_dir <- "test_single_window"
+    
     # Run the forecast
     result <- make_mvgam_forecasts(
       train_data = train_data,
       test_data = test_data,
       models_to_run = model_name,
-      use_ordinal = FALSE
+      use_ordinal = FALSE,
+      config = CONFIG
     )
   }
   
@@ -254,6 +280,7 @@ test_single_window <- function(model_name,
   
   return(result)
 }
+
 #' Test data loading with different configurations
 test_data_loading <- function() {
   
@@ -283,10 +310,10 @@ test_data_loading <- function() {
     cat(glue("  Years: {min(data$year)}-{max(data$year)}\n"))
   }
 }
+
 # =============================================================================
 # EXAMPLE USAGE
 # =============================================================================
 # Uncomment the test you want to run:
 # Test ar model quickly
 # test_single_model("ar", framework = "mvgam", use_full_data = FALSE)
-# Test
