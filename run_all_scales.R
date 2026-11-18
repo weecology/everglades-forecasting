@@ -22,16 +22,18 @@ source("data_functions.R")
 # =============================================================================
 # CONFIGURATION - EDIT THIS SECTION
 # =============================================================================
-SPECIES_TO_RUN   <- "top6"
+SPECIES_TO_RUN   <- c("whib",'wost') #top6
 FORECAST_TOTALS  <- FALSE
-SCALES_TO_RUN    <- c("system", "subregion") #c("system", "subregion", "colony")
+SCALES_TO_RUN    <- c("system") #c("system", "subregion", "colony")
 FABLE_MODELS     <- c()
 # c("arima", "tslm", "arima_exog", "gam")
-MVGAM_MODELS     <- c('ar', 'ar_exog')
+MVGAM_MODELS     <- c('ar')
 # c('ar', 'ar_exog', 'ar_exog_plus', 'trait', 'species_specific', 'trait2')
 PARALLEL         <- FALSE
 PARALLEL_WORKERS <- 3
-FORECAST_HORIZON  <- 2
+FORECAST_HORIZON  <- 5 # 2
+CV_WINDOWS       <- 1
+#NULL equals max, can chose 1,2,3 windows 
 # =============================================================================
 # SERIAL PRECOMPUTE OF ALL SHARED ARTIFACTS
 # =============================================================================
@@ -111,8 +113,7 @@ base_config$models$fable            <- FABLE_MODELS
 base_config$run_mvgam               <- length(MVGAM_MODELS) > 0
 base_config$run_fable               <- length(FABLE_MODELS) > 0
 base_config$forecast_horizon        <- FORECAST_HORIZON
-# Disable individual PDF generation at the main.R level - aggregated 
-base_config$plots$generate_forecast_pdfs <- FALSE 
+base_config$cv_windows              <- CV_WINDOWS
 saveRDS(base_config, file.path(scale_run_folder, "base_config.rds"))
 cat("📋 Configuration:\n")
 cat("  • Species:",         paste(SPECIES_TO_RUN, collapse = ", "), "\n")
@@ -820,461 +821,461 @@ if (is.null(all_window_metrics) || nrow(all_window_metrics) == 0) {
 #
 # Keeps metrics, configurations, summaries, and comparison figures.
 # =============================================================================
-
-cat("\nGenerating combined forecast PDF...\n")
-
-# Set FALSE for the first test if you want to inspect the PDF before deletion.
-DELETE_RAW_AFTER_VALIDATION <- TRUE
-
-build_combined_forecast_pdf <- function(root, delete_raw = FALSE) {
-  if (!requireNamespace("pdftools", quietly = TRUE)) {
-    stop(
-      "Install pdftools before running PDF generation. ",
-      "No raw forecast files have been deleted."
-    )
-  }
-  
-  root <- normalizePath(root, winslash = "/", mustWork = TRUE)
-  
-  files <- sort(list.files(
-    root,
-    pattern = "^forecast\\.rds$",
-    recursive = TRUE,
-    full.names = TRUE
-  ))
-  
-  if (!length(files)) {
-    stop(
-      "No forecast.rds files found under: ", root,
-      ". They may already have been deleted by the previous PDF code."
-    )
-  }
-  
-  final_pdf <- file.path(root, "all_models_forecasts.pdf")
-  temporary_pdf <- tempfile(
-    pattern = "all_models_forecasts_build_",
-    tmpdir = root,
-    fileext = ".pdf"
-  )
-  
-  device_id <- NULL
-  
-  close_pdf_device <- function() {
-    devices <- grDevices::dev.list()
-    
-    if (!is.null(device_id) &&
-        !is.null(devices) &&
-        device_id %in% devices) {
-      grDevices::dev.off(which = device_id)
-    }
-    
-    device_id <<- NULL
-    invisible(NULL)
-  }
-  
-  on.exit(close_pdf_device(), add = TRUE)
-  
-  # Locate metadata using the windows directory rather than fixed depths.
-  parse_forecast_path <- function(filename) {
-    path <- normalizePath(filename, winslash = "/", mustWork = TRUE)
-    
-    relative <- substring(path, nchar(root) + 2L)
-    parts <- strsplit(relative, "/", fixed = TRUE)[[1]]
-    positions <- which(parts == "windows")
-    
-    if (length(positions) != 1L) {
-      stop("Cannot identify the windows directory in: ", path)
-    }
-    
-    w <- positions[1]
-    
-    if (w < 2L || length(parts) < w + 3L) {
-      stop("Unexpected forecast directory structure: ", path)
-    }
-    
-    framework <- parts[w + 2L]
-    
-    # mvgam: windows/location_year/mvgam/model/forecast.rds
-    # fable: windows/location_year/fable/forecast.rds
-    model <- if (length(parts) == w + 4L) {
-      parts[w + 3L]
-    } else if (
-      framework == "fable" &&
-      length(parts) == w + 3L
-    ) {
-      "fable"
-    } else {
-      stop("Unexpected forecast file layout: ", path)
-    }
-    
-    window_directory <- file.path(
-      root,
-      paste(parts[seq_len(w + 1L)], collapse = "/")
-    )
-    
-    list(
-      relative_file = relative,
-      scale = parts[w - 1L],
-      window = parts[w + 1L],
-      framework = framework,
-      model = model,
-      window_directory = window_directory,
-      run_label = if (w > 2L) {
-        paste(parts[seq_len(w - 2L)], collapse = "/")
-      } else {
-        ""
-      }
-    )
-  }
-  
-  # Handles either returned ggplot/patchwork objects or direct base graphics.
-  draw_mvgam_page <- function(fc, series_index, heading) {
-    p <- graphics::plot(fc, series = series_index)
-    
-    if (inherits(p, "patchwork")) {
-      if (!requireNamespace("patchwork", quietly = TRUE)) {
-        stop("patchwork is required to render this returned plot.")
-      }
-      
-      p <- p + patchwork::plot_annotation(title = heading)
-      print(p)
-      
-    } else if (inherits(p, "ggplot")) {
-      p <- p +
-        ggplot2::labs(title = heading) +
-        ggplot2::theme(
-          plot.title = ggplot2::element_text(
-            size = 10,
-            face = "bold"
-          )
-        )
-      
-      print(p)
-      
-    } else if (is.null(p) || is.list(p)) {
-      # Base plotting methods commonly return NULL or an invisible list.
-      # The PDF page-count check below catches missing/extra pages.
-      graphics::mtext(
-        heading,
-        side = 3,
-        line = 0.5,
-        cex = 0.7,
-        adj = 0
-      )
-      
-    } else {
-      stop(
-        "Unrecognised plot return class: ",
-        paste(class(p), collapse = ", ")
-      )
-    }
-    
-    invisible(NULL)
-  }
-  
-  # Each invocation holds only one raw forecast object.
-  process_file <- function(filename) {
-    metadata <- parse_forecast_path(filename)
-    fc <- readRDS(filename)
-    page_rows <- list()
-    
-    add_page_record <- function(model, series) {
-      tibble::tibble(
-        source_file = metadata$relative_file,
-        run_label = metadata$run_label,
-        scale = metadata$scale,
-        window = metadata$window,
-        framework = metadata$framework,
-        model = model,
-        series = series
-      )
-    }
-    
-    heading_for <- function(model, series) {
-      paste0(
-        "Scale: ", metadata$scale,
-        " | Window: ", metadata$window,
-        "\nModel: ", model,
-        " | Series: ", series
-      )
-    }
-    
-    if (inherits(fc, "mvgam_forecast")) {
-      if (!requireNamespace("mvgam", quietly = TRUE)) {
-        stop("mvgam is required to plot saved forecasts.")
-      }
-      
-      labels <- as.character(fc$series_names)
-      if (!length(labels)) labels <- names(fc$forecasts)
-      
-      if (!length(labels) || anyNA(labels)) {
-        stop("Cannot identify forecast series in: ", filename)
-      }
-      
-      for (s in seq_along(labels)) {
-        draw_mvgam_page(
-          fc,
-          series_index = s,
-          heading = heading_for(metadata$model, labels[s])
-        )
-        
-        page_rows[[length(page_rows) + 1L]] <-
-          add_page_record(metadata$model, labels[s])
-      }
-      
-    } else if (inherits(fc, "fbl_ts")) {
-      if (!requireNamespace("fabletools", quietly = TRUE) ||
-          !requireNamespace("tsibble", quietly = TRUE)) {
-        stop("fabletools and tsibble are required for fable forecasts.")
-      }
-      
-      train_file <- file.path(
-        metadata$window_directory, "train_data.rds"
-      )
-      
-      test_file <- file.path(
-        metadata$window_directory, "test_data.rds"
-      )
-      
-      if (!file.exists(train_file) || !file.exists(test_file)) {
-        stop("Missing fable window inputs for: ", filename)
-      }
-      
-      train <- tibble::as_tibble(readRDS(train_file))
-      test <- tibble::as_tibble(readRDS(test_file))
-      
-      series_keys <- setdiff(tsibble::key_vars(fc), ".model")
-      
-      combinations <- tibble::as_tibble(fc) |>
-        dplyr::select(tidyselect::all_of(c(".model", series_keys))) |>
-        dplyr::distinct()
-      
-      if (!nrow(combinations)) {
-        stop("Fable contains no forecast series: ", filename)
-      }
-      
-      for (j in seq_len(nrow(combinations))) {
-        selected <- combinations[j, , drop = FALSE]
-        
-        keep_fc <- rep(TRUE, nrow(fc))
-        keep_train <- rep(TRUE, nrow(train))
-        keep_test <- rep(TRUE, nrow(test))
-        
-        for (key in names(selected)) {
-          keep_fc <- keep_fc &
-            as.character(fc[[key]]) ==
-            as.character(selected[[key]][1])
-        }
-        
-        for (key in series_keys) {
-          keep_train <- keep_train &
-            as.character(train[[key]]) ==
-            as.character(selected[[key]][1])
-          
-          keep_test <- keep_test &
-            as.character(test[[key]]) ==
-            as.character(selected[[key]][1])
-        }
-        
-        fc_one <- fc[which(keep_fc), ]
-        
-        history <- tsibble::as_tsibble(
-          train[which(keep_train), ],
-          key = tidyselect::all_of(series_keys),
-          index = year
-        )
-        
-        observations <- test[which(keep_test), ]
-        
-        model <- as.character(selected$.model[1])
-        
-        series <- paste(vapply(
-          series_keys,
-          function(key) as.character(selected[[key]][1]),
-          character(1)
-        ), collapse = " / ")
-        
-        if (!nzchar(series)) series <- "series"
-        
-        p <- ggplot2::autoplot(
-          fc_one,
-          history,
-          level = c(80, 95)
-        ) +
-          ggplot2::geom_point(
-            data = observations,
-            mapping = ggplot2::aes(x = year, y = count),
-            inherit.aes = FALSE,
-            colour = "black",
-            size = 1.8
-          ) +
-          ggplot2::labs(
-            title = heading_for(model, series),
-            x = "Year",
-            y = "Count"
-          ) +
-          ggplot2::theme_classic(base_size = 12) +
-          ggplot2::theme(
-            legend.position = "bottom",
-            plot.title = ggplot2::element_text(size = 10)
-          )
-        
-        print(p)
-        
-        page_rows[[length(page_rows) + 1L]] <-
-          add_page_record(model, series)
-      }
-      
-    } else {
-      stop(
-        "Unsupported saved forecast class in ", filename, ": ",
-        paste(class(fc), collapse = ", ")
-      )
-    }
-    
-    list(
-      pages = dplyr::bind_rows(page_rows),
-      input_files = c(
-        file.path(metadata$window_directory, "train_data.rds"),
-        file.path(metadata$window_directory, "test_data.rds")
-      )
-    )
-  }
-  
-  grDevices::pdf(
-    temporary_pdf,
-    width = 12,
-    height = 8,
-    onefile = TRUE,
-    title = "All Models: Hindcasts and Forecasts"
-  )
-  
-  device_id <- grDevices::dev.cur()
-  
-  page_records <- vector("list", length(files))
-  input_files <- character()
-  
-  for (i in seq_along(files)) {
-    cat(sprintf(
-      "  [%d/%d] %s\n",
-      i, length(files),
-      substring(files[i], nchar(root) + 2L)
-    ))
-    
-    # Any error stops the build. No sources are deleted.
-    output <- process_file(files[i])
-    
-    page_records[[i]] <- output$pages
-    input_files <- unique(c(input_files, output$input_files))
-    
-    rm(output)
-    gc(verbose = FALSE)
-  }
-  
-  close_pdf_device()
-  
-  manifest <- dplyr::bind_rows(page_records)
-  expected_pages <- nrow(manifest)
-  
-  info <- pdftools::pdf_info(temporary_pdf)
-  actual_pages <- info$pages
-  
-  if (expected_pages < 1L || actual_pages != expected_pages) {
-    stop(
-      "PDF verification failed: expected ", expected_pages,
-      " pages, found ", actual_pages,
-      ". Raw files retained. Build file: ", temporary_pdf
-    )
-  }
-  
-  # Verify that each page has an extractable label.
-  # This checks labels/page presence, not scientific correctness of the plots.
-  page_text <- pdftools::pdf_text(temporary_pdf)
-  
-  if (length(page_text) != expected_pages ||
-      any(!grepl("Scale:", page_text, fixed = TRUE))) {
-    stop(
-      "PDF page-label verification failed. Raw files retained. ",
-      "Build file: ", temporary_pdf
-    )
-  }
-  
-  # Do not silently overwrite an existing combined report.
-  if (file.exists(final_pdf)) {
-    stop(
-      "A combined PDF already exists: ", final_pdf,
-      ". Rename it before rebuilding. New validated build: ",
-      temporary_pdf
-    )
-  }
-  
-  if (!file.rename(temporary_pdf, final_pdf)) {
-    stop(
-      "Could not publish the combined PDF. ",
-      "Raw files retained. Build file: ", temporary_pdf
-    )
-  }
-  
-  manifest$page <- seq_len(expected_pages)
-  
-  utils::write.csv(
-    manifest,
-    file.path(root, "forecast_pdf_manifest.csv"),
-    row.names = FALSE
-  )
-  
-  cat(
-    "\nVerified combined PDF:", final_pdf,
-    "\nPages:", actual_pages, "\n"
-  )
-  
-  if (isTRUE(delete_raw)) {
-    # Delete only the sources processed above and their window inputs.
-    candidates <- unique(c(files, input_files))
-    candidates <- candidates[file.exists(candidates)]
-    
-    cleanup <- data.frame(
-      file = substring(candidates, nchar(root) + 2L),
-      bytes = file.info(candidates)$size,
-      deleted = FALSE,
-      stringsAsFactors = FALSE
-    )
-    
-    for (i in seq_along(candidates)) {
-      cleanup$deleted[i] <- file.remove(candidates[i])
-    }
-    
-    utils::write.csv(
-      cleanup,
-      file.path(root, "forecast_cleanup_manifest.csv"),
-      row.names = FALSE
-    )
-    
-    if (any(!cleanup$deleted)) {
-      warning(
-        "Some source files could not be deleted. ",
-        "See forecast_cleanup_manifest.csv.",
-        call. = FALSE
-      )
-    }
-    
-    cat(
-      "Deleted", sum(cleanup$deleted), "source files;",
-      "reclaimed approximately",
-      round(sum(cleanup$bytes[cleanup$deleted], na.rm = TRUE) / 1024^3, 2),
-      "GiB.\n"
-    )
-  } else {
-    cat("Raw files retained for visual inspection.\n")
-  }
-  
-  invisible(manifest)
-}
-
-forecast_pdf_manifest <- build_combined_forecast_pdf(
-  root = scale_run_folder,
-  delete_raw = DELETE_RAW_AFTER_VALIDATION
-)
+# 
+# cat("\nGenerating combined forecast PDF...\n")
+# 
+# # Set FALSE for the first test if you want to inspect the PDF before deletion.
+# DELETE_RAW_AFTER_VALIDATION <- FALSE
+# 
+# build_combined_forecast_pdf <- function(root, delete_raw = FALSE) {
+#   if (!requireNamespace("pdftools", quietly = TRUE)) {
+#     stop(
+#       "Install pdftools before running PDF generation. ",
+#       "No raw forecast files have been deleted."
+#     )
+#   }
+#   
+#   root <- normalizePath(root, winslash = "/", mustWork = TRUE)
+#   
+#   files <- sort(list.files(
+#     root,
+#     pattern = "^forecast\\.rds$",
+#     recursive = TRUE,
+#     full.names = TRUE
+#   ))
+#   
+#   if (!length(files)) {
+#     stop(
+#       "No forecast.rds files found under: ", root,
+#       ". They may already have been deleted by the previous PDF code."
+#     )
+#   }
+#   
+#   final_pdf <- file.path(root, "all_models_forecasts.pdf")
+#   temporary_pdf <- tempfile(
+#     pattern = "all_models_forecasts_build_",
+#     tmpdir = root,
+#     fileext = ".pdf"
+#   )
+#   
+#   device_id <- NULL
+#   
+#   close_pdf_device <- function() {
+#     devices <- grDevices::dev.list()
+#     
+#     if (!is.null(device_id) &&
+#         !is.null(devices) &&
+#         device_id %in% devices) {
+#       grDevices::dev.off(which = device_id)
+#     }
+#     
+#     device_id <<- NULL
+#     invisible(NULL)
+#   }
+#   
+#   on.exit(close_pdf_device(), add = TRUE)
+#   
+#   # Locate metadata using the windows directory rather than fixed depths.
+#   parse_forecast_path <- function(filename) {
+#     path <- normalizePath(filename, winslash = "/", mustWork = TRUE)
+#     
+#     relative <- substring(path, nchar(root) + 2L)
+#     parts <- strsplit(relative, "/", fixed = TRUE)[[1]]
+#     positions <- which(parts == "windows")
+#     
+#     if (length(positions) != 1L) {
+#       stop("Cannot identify the windows directory in: ", path)
+#     }
+#     
+#     w <- positions[1]
+#     
+#     if (w < 2L || length(parts) < w + 3L) {
+#       stop("Unexpected forecast directory structure: ", path)
+#     }
+#     
+#     framework <- parts[w + 2L]
+#     
+#     # mvgam: windows/location_year/mvgam/model/forecast.rds
+#     # fable: windows/location_year/fable/forecast.rds
+#     model <- if (length(parts) == w + 4L) {
+#       parts[w + 3L]
+#     } else if (
+#       framework == "fable" &&
+#       length(parts) == w + 3L
+#     ) {
+#       "fable"
+#     } else {
+#       stop("Unexpected forecast file layout: ", path)
+#     }
+#     
+#     window_directory <- file.path(
+#       root,
+#       paste(parts[seq_len(w + 1L)], collapse = "/")
+#     )
+#     
+#     list(
+#       relative_file = relative,
+#       scale = parts[w - 1L],
+#       window = parts[w + 1L],
+#       framework = framework,
+#       model = model,
+#       window_directory = window_directory,
+#       run_label = if (w > 2L) {
+#         paste(parts[seq_len(w - 2L)], collapse = "/")
+#       } else {
+#         ""
+#       }
+#     )
+#   }
+#   
+#   # Handles either returned ggplot/patchwork objects or direct base graphics.
+#   draw_mvgam_page <- function(fc, series_index, heading) {
+#     p <- graphics::plot(fc, series = series_index)
+#     
+#     if (inherits(p, "patchwork")) {
+#       if (!requireNamespace("patchwork", quietly = TRUE)) {
+#         stop("patchwork is required to render this returned plot.")
+#       }
+#       
+#       p <- p + patchwork::plot_annotation(title = heading)
+#       print(p)
+#       
+#     } else if (inherits(p, "ggplot")) {
+#       p <- p +
+#         ggplot2::labs(title = heading) +
+#         ggplot2::theme(
+#           plot.title = ggplot2::element_text(
+#             size = 10,
+#             face = "bold"
+#           )
+#         )
+#       
+#       print(p)
+#       
+#     } else if (is.null(p) || is.list(p)) {
+#       # Base plotting methods commonly return NULL or an invisible list.
+#       # The PDF page-count check below catches missing/extra pages.
+#       graphics::mtext(
+#         heading,
+#         side = 3,
+#         line = 0.5,
+#         cex = 0.7,
+#         adj = 0
+#       )
+#       
+#     } else {
+#       stop(
+#         "Unrecognised plot return class: ",
+#         paste(class(p), collapse = ", ")
+#       )
+#     }
+#     
+#     invisible(NULL)
+#   }
+#   
+#   # Each invocation holds only one raw forecast object.
+#   process_file <- function(filename) {
+#     metadata <- parse_forecast_path(filename)
+#     fc <- readRDS(filename)
+#     page_rows <- list()
+#     
+#     add_page_record <- function(model, series) {
+#       tibble::tibble(
+#         source_file = metadata$relative_file,
+#         run_label = metadata$run_label,
+#         scale = metadata$scale,
+#         window = metadata$window,
+#         framework = metadata$framework,
+#         model = model,
+#         series = series
+#       )
+#     }
+#     
+#     heading_for <- function(model, series) {
+#       paste0(
+#         "Scale: ", metadata$scale,
+#         " | Window: ", metadata$window,
+#         "\nModel: ", model,
+#         " | Series: ", series
+#       )
+#     }
+#     
+#     if (inherits(fc, "mvgam_forecast")) {
+#       if (!requireNamespace("mvgam", quietly = TRUE)) {
+#         stop("mvgam is required to plot saved forecasts.")
+#       }
+#       
+#       labels <- as.character(fc$series_names)
+#       if (!length(labels)) labels <- names(fc$forecasts)
+#       
+#       if (!length(labels) || anyNA(labels)) {
+#         stop("Cannot identify forecast series in: ", filename)
+#       }
+#       
+#       for (s in seq_along(labels)) {
+#         draw_mvgam_page(
+#           fc,
+#           series_index = s,
+#           heading = heading_for(metadata$model, labels[s])
+#         )
+#         
+#         page_rows[[length(page_rows) + 1L]] <-
+#           add_page_record(metadata$model, labels[s])
+#       }
+#       
+#     } else if (inherits(fc, "fbl_ts")) {
+#       if (!requireNamespace("fabletools", quietly = TRUE) ||
+#           !requireNamespace("tsibble", quietly = TRUE)) {
+#         stop("fabletools and tsibble are required for fable forecasts.")
+#       }
+#       
+#       train_file <- file.path(
+#         metadata$window_directory, "train_data.rds"
+#       )
+#       
+#       test_file <- file.path(
+#         metadata$window_directory, "test_data.rds"
+#       )
+#       
+#       if (!file.exists(train_file) || !file.exists(test_file)) {
+#         stop("Missing fable window inputs for: ", filename)
+#       }
+#       
+#       train <- tibble::as_tibble(readRDS(train_file))
+#       test <- tibble::as_tibble(readRDS(test_file))
+#       
+#       series_keys <- setdiff(tsibble::key_vars(fc), ".model")
+#       
+#       combinations <- tibble::as_tibble(fc) |>
+#         dplyr::select(tidyselect::all_of(c(".model", series_keys))) |>
+#         dplyr::distinct()
+#       
+#       if (!nrow(combinations)) {
+#         stop("Fable contains no forecast series: ", filename)
+#       }
+#       
+#       for (j in seq_len(nrow(combinations))) {
+#         selected <- combinations[j, , drop = FALSE]
+#         
+#         keep_fc <- rep(TRUE, nrow(fc))
+#         keep_train <- rep(TRUE, nrow(train))
+#         keep_test <- rep(TRUE, nrow(test))
+#         
+#         for (key in names(selected)) {
+#           keep_fc <- keep_fc &
+#             as.character(fc[[key]]) ==
+#             as.character(selected[[key]][1])
+#         }
+#         
+#         for (key in series_keys) {
+#           keep_train <- keep_train &
+#             as.character(train[[key]]) ==
+#             as.character(selected[[key]][1])
+#           
+#           keep_test <- keep_test &
+#             as.character(test[[key]]) ==
+#             as.character(selected[[key]][1])
+#         }
+#         
+#         fc_one <- fc[which(keep_fc), ]
+#         
+#         history <- tsibble::as_tsibble(
+#           train[which(keep_train), ],
+#           key = tidyselect::all_of(series_keys),
+#           index = year
+#         )
+#         
+#         observations <- test[which(keep_test), ]
+#         
+#         model <- as.character(selected$.model[1])
+#         
+#         series <- paste(vapply(
+#           series_keys,
+#           function(key) as.character(selected[[key]][1]),
+#           character(1)
+#         ), collapse = " / ")
+#         
+#         if (!nzchar(series)) series <- "series"
+#         
+#         p <- ggplot2::autoplot(
+#           fc_one,
+#           history,
+#           level = c(80, 95)
+#         ) +
+#           ggplot2::geom_point(
+#             data = observations,
+#             mapping = ggplot2::aes(x = year, y = count),
+#             inherit.aes = FALSE,
+#             colour = "black",
+#             size = 1.8
+#           ) +
+#           ggplot2::labs(
+#             title = heading_for(model, series),
+#             x = "Year",
+#             y = "Count"
+#           ) +
+#           ggplot2::theme_classic(base_size = 12) +
+#           ggplot2::theme(
+#             legend.position = "bottom",
+#             plot.title = ggplot2::element_text(size = 10)
+#           )
+#         
+#         print(p)
+#         
+#         page_rows[[length(page_rows) + 1L]] <-
+#           add_page_record(model, series)
+#       }
+#       
+#     } else {
+#       stop(
+#         "Unsupported saved forecast class in ", filename, ": ",
+#         paste(class(fc), collapse = ", ")
+#       )
+#     }
+#     
+#     list(
+#       pages = dplyr::bind_rows(page_rows),
+#       input_files = c(
+#         file.path(metadata$window_directory, "train_data.rds"),
+#         file.path(metadata$window_directory, "test_data.rds")
+#       )
+#     )
+#   }
+#   
+#   grDevices::pdf(
+#     temporary_pdf,
+#     width = 12,
+#     height = 8,
+#     onefile = TRUE,
+#     title = "All Models: Hindcasts and Forecasts"
+#   )
+#   
+#   device_id <- grDevices::dev.cur()
+#   
+#   page_records <- vector("list", length(files))
+#   input_files <- character()
+#   
+#   for (i in seq_along(files)) {
+#     cat(sprintf(
+#       "  [%d/%d] %s\n",
+#       i, length(files),
+#       substring(files[i], nchar(root) + 2L)
+#     ))
+#     
+#     # Any error stops the build. No sources are deleted.
+#     output <- process_file(files[i])
+#     
+#     page_records[[i]] <- output$pages
+#     input_files <- unique(c(input_files, output$input_files))
+#     
+#     rm(output)
+#     gc(verbose = FALSE)
+#   }
+#   
+#   close_pdf_device()
+#   
+#   manifest <- dplyr::bind_rows(page_records)
+#   expected_pages <- nrow(manifest)
+#   
+#   info <- pdftools::pdf_info(temporary_pdf)
+#   actual_pages <- info$pages
+#   
+#   if (expected_pages < 1L || actual_pages != expected_pages) {
+#     stop(
+#       "PDF verification failed: expected ", expected_pages,
+#       " pages, found ", actual_pages,
+#       ". Raw files retained. Build file: ", temporary_pdf
+#     )
+#   }
+#   
+#   # Verify that each page has an extractable label.
+#   # This checks labels/page presence, not scientific correctness of the plots.
+#   page_text <- pdftools::pdf_text(temporary_pdf)
+#   
+#   if (length(page_text) != expected_pages ||
+#       any(!grepl("Scale:", page_text, fixed = TRUE))) {
+#     stop(
+#       "PDF page-label verification failed. Raw files retained. ",
+#       "Build file: ", temporary_pdf
+#     )
+#   }
+#   
+#   # Do not silently overwrite an existing combined report.
+#   if (file.exists(final_pdf)) {
+#     stop(
+#       "A combined PDF already exists: ", final_pdf,
+#       ". Rename it before rebuilding. New validated build: ",
+#       temporary_pdf
+#     )
+#   }
+#   
+#   if (!file.rename(temporary_pdf, final_pdf)) {
+#     stop(
+#       "Could not publish the combined PDF. ",
+#       "Raw files retained. Build file: ", temporary_pdf
+#     )
+#   }
+#   
+#   manifest$page <- seq_len(expected_pages)
+#   
+#   utils::write.csv(
+#     manifest,
+#     file.path(root, "forecast_pdf_manifest.csv"),
+#     row.names = FALSE
+#   )
+#   
+#   cat(
+#     "\nVerified combined PDF:", final_pdf,
+#     "\nPages:", actual_pages, "\n"
+#   )
+#   
+#   if (isTRUE(delete_raw)) {
+#     # Delete only the sources processed above and their window inputs.
+#     candidates <- unique(c(files, input_files))
+#     candidates <- candidates[file.exists(candidates)]
+#     
+#     cleanup <- data.frame(
+#       file = substring(candidates, nchar(root) + 2L),
+#       bytes = file.info(candidates)$size,
+#       deleted = FALSE,
+#       stringsAsFactors = FALSE
+#     )
+#     
+#     for (i in seq_along(candidates)) {
+#       cleanup$deleted[i] <- file.remove(candidates[i])
+#     }
+#     
+#     utils::write.csv(
+#       cleanup,
+#       file.path(root, "forecast_cleanup_manifest.csv"),
+#       row.names = FALSE
+#     )
+#     
+#     if (any(!cleanup$deleted)) {
+#       warning(
+#         "Some source files could not be deleted. ",
+#         "See forecast_cleanup_manifest.csv.",
+#         call. = FALSE
+#       )
+#     }
+#     
+#     cat(
+#       "Deleted", sum(cleanup$deleted), "source files;",
+#       "reclaimed approximately",
+#       round(sum(cleanup$bytes[cleanup$deleted], na.rm = TRUE) / 1024^3, 2),
+#       "GiB.\n"
+#     )
+#   } else {
+#     cat("Raw files retained for visual inspection.\n")
+#   }
+#   
+#   invisible(manifest)
+# }
+# 
+# forecast_pdf_manifest <- build_combined_forecast_pdf(
+#   root = scale_run_folder,
+#   delete_raw = DELETE_RAW_AFTER_VALIDATION
+# )
 
 
 # =============================================================================
@@ -1291,8 +1292,8 @@ cat("  • window_skill_all_scales.csv       - Per-window skill scores (all mode
 cat("  • all_models_window_delta.png       - Cross-model delta plot with ggside marginal\n")
 cat("  • all_models_window_delta.csv       - Cross-model delta table\n")
 cat("  • all_models_summary.csv            - Aggregated summary across windows\n")
-cat("  • window_delta_marginal/            - ggExtra per-panel marginal plots\n")
-cat("  • all_models_forecasts.pdf          - Single PDF containing all forecasting plots\n\n")
+# cat("  • window_delta_marginal/            - ggExtra per-panel marginal plots\n")
+# cat("  • all_models_forecasts.pdf          - Single PDF containing all forecasting plots\n\n")
 
 for (model_key in names(all_model_results)) {
   cat(glue("  • {model_key}/\n"))

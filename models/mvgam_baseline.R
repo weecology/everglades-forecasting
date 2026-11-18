@@ -15,7 +15,7 @@ fit_mvgam_baseline <- function(train_data, test_data, config) {
   
   n_series <- length(unique(train_data$series))
   
-  baseline_formula <- if (CONFIG$spatial$forecast_totals == TRUE) {                  #this needs to be different.... if species >1 then have +series but not if running individual species... 
+  baseline_formula <- if (CONFIG$spatial$forecast_totals == TRUE) {                  # this needs to be different.... if species >1 then have +series but not if running individual species... 
     count ~ -1 + series                                                              # this goes in formula, if I can figure it out.... 
   } else {
     count ~ 1
@@ -37,7 +37,7 @@ fit_mvgam_baseline <- function(train_data, test_data, config) {
       samples  = config$samples
     )
 
-    fc   <- forecast(model, newdata = test_data, type = "response")
+    fc   <- forecast(model, newdata = test_data, type = "response")   
     crps <- extract_crps_mvgam(fc, model_name = "baseline")
 
     return(list(fc = fc, crps = crps))
@@ -51,3 +51,19 @@ fit_mvgam_baseline <- function(train_data, test_data, config) {
 }
 
 
+
+
+# type
+# 
+# When this has the value link (default) the linear predictor is calculated on the 
+# link scale. If expected is used, predictions reflect the expectation of the response 
+# (the mean) but ignore uncertainty in the observation process. When response is used, 
+# the predictions take uncertainty in the observation process into account to return 
+# predictions on the outcome scale. When variance is used, the variance of the response 
+# with respect to the mean (mean-variance relationship) is returned. When type = "terms", 
+# each component of the linear predictor is returned separately in the form of a list 
+# (possibly with standard errors, if summary = TRUE): this includes parametric model 
+# components, followed by each smooth component, but excludes any offset and any intercept. 
+# Two special cases are also allowed: type latent_N will return the estimated latent 
+# abundances from an N-mixture distribution, while type detection will return the 
+# estimated detection probability from an N-mixture distribution
