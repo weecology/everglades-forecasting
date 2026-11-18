@@ -22,7 +22,7 @@ source("data_functions.R")
 # =============================================================================
 # CONFIGURATION - EDIT THIS SECTION
 # =============================================================================
-SPECIES_TO_RUN   <- c("whib",'wost') #top6
+SPECIES_TO_RUN   <- c("top6") #top6
 FORECAST_TOTALS  <- FALSE
 SCALES_TO_RUN    <- c("system") #c("system", "subregion", "colony")
 FABLE_MODELS     <- c()
@@ -32,7 +32,7 @@ MVGAM_MODELS     <- c('ar')
 PARALLEL         <- FALSE
 PARALLEL_WORKERS <- 3
 FORECAST_HORIZON  <- 5 # 2
-CV_WINDOWS       <- 1
+CV_WINDOWS       <- NULL
 #NULL equals max, can chose 1,2,3 windows 
 # =============================================================================
 # SERIAL PRECOMPUTE OF ALL SHARED ARTIFACTS
