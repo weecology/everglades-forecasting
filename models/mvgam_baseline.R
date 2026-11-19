@@ -1,8 +1,8 @@
 fit_mvgam_baseline <- function(train_data, test_data, config) {
   cat("  Fitting baseline model...\n")
   
-  model_family <- if (is.null(config$family)) {
-    NA
+  model_family <- if (is.null(config$family) || is.na(config$family)) {
+    nb()  
   } else if (config$family == "poisson") {
     poisson()
   } else if (config$family == "nb") {
@@ -23,6 +23,10 @@ fit_mvgam_baseline <- function(train_data, test_data, config) {
   
   cat(glue::glue("    Using formula: {deparse(baseline_formula)}\n"))
   cat(glue::glue("    N series: {n_series}\n"))
+  saveRDS(train_data, file = glue::glue("debug_train_{unique(train_data$series)[1]}.rds"))
+  saveRDS(test_data,  file = glue::glue("debug_test_{unique(train_data$series)[1]}.rds"))
+  saveRDS(config, file = "debug_config.rds")
+  
   
   tryCatch({
     model <- mvgam(

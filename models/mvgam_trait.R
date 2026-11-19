@@ -35,7 +35,7 @@ fit_mvgam_trait <- function(train_data, test_data, config) {
   # =========================================================================
   
   model_family <- if (is.null(config$family)) {
-    NA
+    nb()
   } else if (config$family == "poisson") {
     poisson()
   } else if (config$family == "nb") {
