@@ -22,7 +22,7 @@ source("data_functions.R")
 # =============================================================================
 # CONFIGURATION - EDIT THIS SECTION
 # =============================================================================
-SPECIES_TO_RUN   <- c('wost') #top6
+SPECIES_TO_RUN   <- c('top6') #top6
 FORECAST_TOTALS  <- FALSE
 SCALES_TO_RUN    <- c("system", 'subregion') #c("system", "subregion", "colony")
 FABLE_MODELS     <- c()
