@@ -30,7 +30,7 @@ fit_mvgam_baseline <- function(train_data, test_data, config) {
   
   tryCatch({
     model <- mvgam(
-      formula  = count ~ 1,
+      formula  = baseline_formula,
       data     = train_data,
       #newdata  = test_data,
       family   = model_family,

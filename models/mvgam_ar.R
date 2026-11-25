@@ -33,7 +33,7 @@ fit_mvgam_ar <- function(train_data, test_data, config) {
   
   tryCatch({
     model <- mvgam(
-      formula      = count ~ 1,
+      formula      = baseline_formula,
       trend_formula = ~ s(breed_season_depth, bs = 'cr', k = 5) +
         s(dry_days,           bs = 'cr', k = 5) +
         s(recession,          bs = 'cr', k = 5),

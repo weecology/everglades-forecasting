@@ -56,7 +56,7 @@ fit_mvgam_ar_exog <- function(train_data, test_data, config) {
   
   tryCatch({
     model <- mvgam(
-      formula       = count ~ 1,
+      formula       = baseline_formula
       trend_formula = ~ breed_season_depth + I(breed_season_depth^2) +
         recession + dry_days,
       trend_model   = mvgam::AR(p = 1),
