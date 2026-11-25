@@ -13,15 +13,20 @@ fit_mvgam_baseline <- function(train_data, test_data, config) {
     nb()
   }
   
-  n_series <- length(unique(train_data$series))
+  n_series <- length(unique(as.character(train_data$series)))
   
-  baseline_formula <- if (CONFIG$spatial$forecast_totals == TRUE) {                  # this needs to be different.... if species >1 then have +series but not if running individual species... 
-    count ~ -1 + series                                                              # this goes in formula, if I can figure it out.... 
+  observation_formula <- if (n_series > 1L) {
+    count ~ -1 + series
   } else {
     count ~ 1
   }
   
-  cat(glue::glue("    Using formula: {deparse(baseline_formula)}\n"))
+  cat(
+    "    Using formula:",
+    paste(deparse(observation_formula), collapse = " "),
+    "\n"
+  )
+  
   cat(glue::glue("    N series: {n_series}\n"))
   # saveRDS(train_data, file = glue::glue("debug_train_{unique(train_data$series)[1]}.rds"))
   # saveRDS(test_data,  file = glue::glue("debug_test_{unique(train_data$series)[1]}.rds"))
@@ -30,7 +35,7 @@ fit_mvgam_baseline <- function(train_data, test_data, config) {
   
   tryCatch({
     model <- mvgam(
-      formula  = baseline_formula,
+      formula  = count ~ 1,
       data     = train_data,
       #newdata  = test_data,
       family   = model_family,

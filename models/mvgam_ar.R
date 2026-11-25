@@ -17,6 +17,21 @@ fit_mvgam_ar <- function(train_data, test_data, config) {
     nb()
   }
   
+  
+  n_series <- length(unique(as.character(train_data$series)))
+  
+  observation_formula <- if (n_series > 1L) {
+    count ~ -1 + series
+  } else {
+    count ~ 1
+  }
+  
+  cat(
+    "    Using formula:",
+    paste(deparse(observation_formula), collapse = " "),
+    "\n"
+  )
+  
   # =========================================================================
   # GUARD: ensure series factor levels are consistent
   # =========================================================================
@@ -33,7 +48,7 @@ fit_mvgam_ar <- function(train_data, test_data, config) {
   
   tryCatch({
     model <- mvgam(
-      formula      = baseline_formula,
+      formula      = count ~ 1,
       trend_formula = ~ s(breed_season_depth, bs = 'cr', k = 5) +
         s(dry_days,           bs = 'cr', k = 5) +
         s(recession,          bs = 'cr', k = 5),
