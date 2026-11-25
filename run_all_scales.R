@@ -1,1204 +1,1300 @@
 # =============================================================================
 # RUN_ALL_SCALES.R
-# Run each model separately across all spatial scales, compare skill deltas.
+#
+# Sequential model-by-model comparisons across spatial scales.
+#
+# Requires:
+#   config.yml profile "run_all_scales"
+#   main.R defining run_forecasting_pipeline <- function() { ... }
+#   data_functions.R
+#   evaluation.R
+#   selected model scripts
+#
+# Safety:
+#   - Never deletes run directories or raw forecasts.
+#   - Verifies copied files using checksums.
+#   - Writes checkpoints after each model/scale run.
+#   - Preserves original finite skill values without clipping.
+#   - PDF failures do not invalidate completed forecasting runs.
+#
+# Interpretation:
+#   Scale delta = system skill - mean subregional skill.
+#   This is NOT skill from aggregating regional predictive distributions.
 # =============================================================================
 
-library(dplyr)
-library(ggplot2)
-library(patchwork)
-library(tidyr)
-library(ggExtra)
-library(ggside)
-library(glue)
-library(stringr)
-library(mvgam)
-library(fabletools)
-library(conflicted)
-library(pdftools)
-library(fs)
-
-conflicted::conflicts_prefer(dplyr::filter,   .quiet = TRUE)
-conflicted::conflicts_prefer(dplyr::select,   .quiet = TRUE)
-conflicted::conflicts_prefer(mvgam::AR,       .quiet = TRUE)
-conflicted::conflicts_prefer(mvgam::VAR,      .quiet = TRUE)
-conflicted::conflicts_prefer(mvgam::RW,       .quiet = TRUE)
-
-source("data_functions.R")
-source("evaluation.R")
-
-# =============================================================================
-# CONFIGURATION
-# =============================================================================
-
-SPECIES_TO_RUN   <- c("top6")
-FORECAST_TOTALS  <- FALSE
-SCALES_TO_RUN    <- c("system", "subregion")
-FABLE_MODELS     <- c()
-MVGAM_MODELS     <- c("ar", "ar_exog")
-PARALLEL         <- FALSE
-PARALLEL_WORKERS <- 3
-FORECAST_HORIZON <- 2
-CV_WINDOWS       <- NULL
-
-# =============================================================================
-# SERIAL PRECOMPUTE OF ALL SHARED ARTIFACTS
-# =============================================================================
-
-cat("Precomputing shared data artifacts...\n")
-
-needs_download <- !dir.exists("SiteandMethods") || {
-  stamp <- file.info("SiteandMethods")$mtime
-  is.na(stamp) || difftime(Sys.time(), stamp, units = "days") > 7
-}
-
-if (needs_download) {
-  cat("  Downloading wader observation data...\n")
-  wader::download_observations(".")
-  cat("  ✓ Wader observation data downloaded\n")
-} else {
-  cat("  ✓ Wader observation data current — skipping download\n")
-}
-
-# Load base config early so remote_url is available for water precompute.
-base_config <- config::get(config = "run_all_scales")
-
-cat("  Pre-caching water covariate data...\n")
-tryCatch({
-  get_data_water(remote_url = base_config$water$remote_url %||% NULL)
-  cat("  ✓ Water covariate data cached\n")
-}, error = function(e) warning("Water data pre-cache failed: ", e$message))
-
-cat("  Pre-caching wading bird data...\n")
-tryCatch({
-  tmp_cfg                          <- base_config
-  tmp_cfg$spatial$include_species  <- SPECIES_TO_RUN
-  tmp_cfg$spatial$forecast_totals  <- FORECAST_TOTALS
-  for (sc in SCALES_TO_RUN) {
-    tmp_cfg$spatial$level <- sc
-    get_wading_bird_data(config = tmp_cfg, cache = TRUE)
-    cat(glue("  ✓ Wading bird data cached for scale: {sc}\n"))
-  }
-}, error = function(e) warning("Wading bird data pre-cache failed: ", e$message))
-
-dir.create("cache", showWarnings = FALSE, recursive = TRUE)
-cat("✓ All shared artifacts precomputed\n\n")
-
-# =============================================================================
-# PARALLEL UTILITIES
-# =============================================================================
-
-if (PARALLEL) source("parallel_utils.R")
-
-# =============================================================================
-# HELPERS
-# =============================================================================
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+})
 
 `%||%` <- function(x, y) if (is.null(x)) y else x
 
-extract_window_start_year <- function(window_vec, test_start_vec = NULL) {
-  if (!is.null(test_start_vec)) {
-    yr <- suppressWarnings(
-      as.integer(stringr::str_extract(as.character(test_start_vec), "\\d{4}"))
-    )
-    if (any(!is.na(yr))) return(yr)
+# =============================================================================
+# USER SETTINGS
+# =============================================================================
+
+BASE_PROFILE <- "run_all_scales"
+
+SPECIES_TO_RUN <- "top6"
+FORECAST_TOTALS <- FALSE
+SCALES_TO_RUN <- c("system", "subregion")
+
+MVGAM_MODELS <- c("ar", "ar_exog")
+FABLE_MODELS <- character()
+
+FORECAST_HORIZON <- 2L
+CV_WINDOWS <- 1L                  # Set NULL after the smoke test succeeds.
+
+RUN_BY_REGION <- TRUE
+EXCLUDE_REGIONS <- c("bigcypress", "coastal")
+
+UPDATE_BIRDS <- FALSE
+UPDATE_WATER <- FALSE
+
+GENERATE_NATIVE_PNGS <- TRUE
+GENERATE_FORECAST_PDF <- TRUE
+
+SEED <- 1234L
+
+# =============================================================================
+# BASIC HELPERS
+# =============================================================================
+
+log_line <- function(...) {
+  cat(..., "\n", sep = "")
+}
+
+safe_name <- function(x) {
+  gsub("[^A-Za-z0-9_.-]", "_", as.character(x))
+}
+
+require_package <- function(package) {
+  if (!requireNamespace(package, quietly = TRUE)) {
+    stop("Required package is not installed: ", package)
   }
-  yr <- suppressWarnings(
-    as.integer(stringr::str_extract(as.character(window_vec), "\\d{4}"))
-  )
-  if (any(!is.na(yr))) return(yr)
-  suppressWarnings(as.integer(as.character(window_vec)))
+}
+
+source_required <- function(filename) {
+  if (!file.exists(filename)) {
+    stop("Required script not found: ", filename)
+  }
+  base::source(filename, local = .GlobalEnv)
+}
+
+prefer_namespaces <- function() {
+  if (requireNamespace("conflicted", quietly = TRUE)) {
+    conflicted::conflicts_prefer(dplyr::filter, .quiet = TRUE)
+    conflicted::conflicts_prefer(dplyr::select, .quiet = TRUE)
+    conflicted::conflicts_prefer(base::intersect, .quiet = TRUE)
+    conflicted::conflicts_prefer(base::union, .quiet = TRUE)
+    conflicted::conflicts_prefer(base::setdiff, .quiet = TRUE)
+    conflicted::conflicts_prefer(base::setequal, .quiet = TRUE)
+    conflicted::conflicts_prefer(base::get, .quiet = TRUE)
+    conflicted::conflicts_prefer(base::as.matrix, .quiet = TRUE)
+  }
+}
+
+# Load only the pipeline function, not main.R's final automatic call.
+load_pipeline_definition <- function(filename) {
+  if (!file.exists(filename)) stop("Missing script: ", filename)
+  
+  expressions <- as.list(parse(file = filename))
+  
+  definitions <- Filter(function(expr) {
+    if (!is.call(expr) || length(expr) != 3L) return(FALSE)
+    
+    operator <- expr[[1L]]
+    
+    (identical(operator, as.name("<-")) ||
+        identical(operator, as.name("="))) &&
+      identical(expr[[2L]], as.name("run_forecasting_pipeline")) &&
+      is.call(expr[[3L]]) &&
+      identical(expr[[3L]][[1L]], as.name("function"))
+  }, expressions)
+  
+  if (length(definitions) != 1L) {
+    stop(
+      filename,
+      " must define exactly one top-level ",
+      "run_forecasting_pipeline <- function(...) { ... }."
+    )
+  }
+  
+  eval(definitions[[1L]], envir = .GlobalEnv)
+}
+
+# =============================================================================
+# LOAD PROJECT HELPERS
+# =============================================================================
+
+require_package("config")
+
+source_required("data_functions.R")
+source_required("evaluation.R")
+prefer_namespaces()
+load_pipeline_definition("main.R")
+
+required_helpers <- c(
+  "get_data_water",
+  "get_wading_bird_data",
+  "disk_create_dir",
+  "disk_save_rds",
+  "positive_integer",
+  "assert_unique_rows"
+)
+
+for (name in required_helpers) {
+  if (!exists(name, mode = "function", envir = .GlobalEnv)) {
+    stop("Missing project helper: ", name)
+  }
+}
+
+# =============================================================================
+# CONFIGURATION VALIDATION
+# =============================================================================
+
+SCALES_TO_RUN <- unique(as.character(SCALES_TO_RUN))
+MVGAM_MODELS <- unique(as.character(MVGAM_MODELS))
+FABLE_MODELS <- unique(as.character(FABLE_MODELS))
+
+if (!length(SCALES_TO_RUN) ||
+    anyNA(SCALES_TO_RUN) ||
+    any(!SCALES_TO_RUN %in% c("system", "subregion", "colony"))) {
+  stop("Select valid spatial scales: system, subregion, colony.")
+}
+
+if (!length(MVGAM_MODELS) && !length(FABLE_MODELS)) {
+  stop("Select at least one forecasting model.")
+}
+
+selected_models <- c(MVGAM_MODELS, FABLE_MODELS)
+
+if (anyNA(selected_models) || any(!nzchar(selected_models))) {
+  stop("Model names must be non-missing, non-empty strings.")
+}
+
+if (FORECAST_TOTALS &&
+    any(MVGAM_MODELS %in% c("species_specific", "trait", "trait2"))) {
+  stop("Remove species-specific/trait models when forecasting totals.")
+}
+
+FORECAST_HORIZON <- positive_integer(
+  FORECAST_HORIZON, "FORECAST_HORIZON"
+)
+
+if (!is.null(CV_WINDOWS)) {
+  CV_WINDOWS <- positive_integer(CV_WINDOWS, "CV_WINDOWS")
+}
+
+base_config <- config::get(config = BASE_PROFILE)
+
+for (name in c(
+  "spatial", "models", "parallel", "cache",
+  "plots", "water", "data_update"
+)) {
+  base_config[[name]] <- base_config[[name]] %||% list()
+}
+
+base_config$spatial$include_species <- SPECIES_TO_RUN
+base_config$spatial$forecast_totals <- FORECAST_TOTALS
+base_config$spatial$exclude_regions <- base::union(
+  as.character(unlist(base_config$spatial$exclude_regions)),
+  EXCLUDE_REGIONS
+)
+
+base_config$train_years <- positive_integer(
+  base_config$train_years %||% 20L,
+  "train_years"
+)
+
+base_config$forecast_horizon <- FORECAST_HORIZON
+base_config$test_years <- FORECAST_HORIZON
+base_config$cv_windows <- CV_WINDOWS
+
+base_config$models$mvgam <- MVGAM_MODELS
+base_config$models$fable <- FABLE_MODELS
+base_config$run_mvgam <- length(MVGAM_MODELS) > 0L
+base_config$run_fable <- length(FABLE_MODELS) > 0L
+
+base_config$parallel$enabled <- FALSE
+
+# Force fresh preparation in main.R rather than relying on old prepared caches.
+# Source observations and the processed water CSV remain disk-backed.
+base_config$cache$data <- FALSE
+base_config$cache$models <- FALSE
+
+# Training-only ordinal thresholds avoid held-out-data leakage.
+base_config$sliding_window_breaks <- TRUE
+
+# Disable main.R's end-of-run comparison plotting.
+# The wrapper generates comparison plots below.
+base_config$plots$enabled <- FALSE
+base_config$plots$native_mvgam <- GENERATE_NATIVE_PNGS
+base_config$plots$native_fable <- GENERATE_NATIVE_PNGS
+base_config$plots$generate_forecast_pdfs <- FALSE
+
+for (model in unique(c(
+  if (length(MVGAM_MODELS)) "baseline",
+  MVGAM_MODELS
+))) {
+  filename <- file.path("models", paste0("mvgam_", model, ".R"))
+  if (!file.exists(filename)) stop("Missing model script: ", filename)
+}
+
+if (length(FABLE_MODELS) && !file.exists("models/fable_models.R")) {
+  stop("Missing models/fable_models.R")
 }
 
 # =============================================================================
 # OUTPUT DIRECTORY
 # =============================================================================
 
-timestamp        <- format(Sys.time(), "%Y%m%d-%H%M")
-all_models_str   <- paste(c(MVGAM_MODELS, FABLE_MODELS), collapse = "-")
-all_scales_str   <- paste(SCALES_TO_RUN,  collapse = "-")
-species_str      <- paste(SPECIES_TO_RUN, collapse = "-")
+disk_create_dir("results")
+disk_create_dir("cache")
 
-scale_run_folder <- file.path(
-  "results",
-  paste0(species_str, "_scale_run_", all_models_str, "_",
-         all_scales_str, "_", timestamp)
+stem <- paste(
+  safe_name(paste(SPECIES_TO_RUN, collapse = "-")),
+  "scale_run",
+  format(Sys.time(), "%Y%m%d-%H%M%S"),
+  Sys.getpid(),
+  sep = "_"
 )
-dir.create(scale_run_folder, recursive = TRUE, showWarnings = FALSE)
 
-cat(paste(rep("=", 80), collapse = ""), "\n")
-cat("MODEL-BY-MODEL SPATIAL SCALE COMPARISON\n")
-cat(paste(rep("=", 80), collapse = ""), "\n")
-cat("Results folder:", scale_run_folder, "\n\n")
+scale_run_folder <- file.path("results", stem)
+suffix <- 0L
 
-# =============================================================================
-# APPLY USER SETTINGS TO BASE CONFIG
-# =============================================================================
+while (dir.exists(scale_run_folder)) {
+  suffix <- suffix + 1L
+  scale_run_folder <- file.path("results", paste0(stem, "_", suffix))
+}
 
-base_config$spatial$include_species      <- SPECIES_TO_RUN
-base_config$spatial$forecast_totals      <- FORECAST_TOTALS
-base_config$models$mvgam                 <- MVGAM_MODELS
-base_config$models$fable                 <- FABLE_MODELS
-base_config$run_mvgam                    <- length(MVGAM_MODELS) > 0L
-base_config$run_fable                    <- length(FABLE_MODELS) > 0L
-base_config$forecast_horizon             <- FORECAST_HORIZON
-base_config$cv_windows                   <- CV_WINDOWS
-base_config$plots$generate_forecast_pdfs <- FALSE
+disk_create_dir(scale_run_folder)
 
-saveRDS(base_config, file.path(scale_run_folder, "base_config.rds"))
-
-cat("Configuration:\n")
-cat("  Species        :", paste(SPECIES_TO_RUN, collapse = ", "), "\n")
-cat("  Forecast totals:", FORECAST_TOTALS, "\n")
-cat("  Scales         :", paste(SCALES_TO_RUN,  collapse = ", "), "\n")
-cat("  mvgam models   :", if (length(MVGAM_MODELS) > 0L) paste(MVGAM_MODELS, collapse = ", ") else "none", "\n")
-cat("  fable models   :", if (length(FABLE_MODELS) > 0L) paste(FABLE_MODELS, collapse = ", ") else "none", "\n")
-cat("  Parallel       :", PARALLEL, "\n")
-if (PARALLEL) cat("  Workers        :", PARALLEL_WORKERS, "\n")
-cat("✓ Base configuration saved\n\n")
+log_line("Results directory: ", scale_run_folder)
+log_line("Profile: ", BASE_PROFILE)
+log_line("Scales: ", paste(SCALES_TO_RUN, collapse = ", "))
+log_line("CV windows: ", CV_WINDOWS %||% "all")
 
 # =============================================================================
-# BUILD MODEL LIST
+# SHARED SOURCE-DATA PREPARATION
+# =============================================================================
+
+invalidate_prepared_cache <- function() {
+  files <- list.files(
+    "cache",
+    pattern = "^data_.*\\.rds$",
+    full.names = TRUE
+  )
+  
+  if (length(files) && !all(file.remove(files))) {
+    stop("Could not invalidate prepared data caches.")
+  }
+}
+
+log_line("\nPreparing shared source data...")
+
+if (UPDATE_BIRDS || !dir.exists("SiteandMethods")) {
+  wader::download_observations(".")
+  invalidate_prepared_cache()
+}
+
+if (!dir.exists("SiteandMethods")) {
+  stop(
+    "SiteandMethods was not found after bird-data preparation. ",
+    "Check the observation download location."
+  )
+}
+
+water <- get_data_water(
+  remote_url = base_config$water$remote_url,
+  update = UPDATE_WATER
+)
+
+if (!nrow(water)) stop("Water-data preparation returned no rows.")
+rm(water)
+
+if (UPDATE_WATER) invalidate_prepared_cache()
+
+# Source updates were handled above. Do not repeat downloads in main.R.
+base_config$data_update$birds <- FALSE
+base_config$data_update$water <- FALSE
+base_config$water$remote_url <- NULL
+
+disk_save_rds(
+  base_config,
+  file.path(scale_run_folder, "base_config.rds")
+)
+
+# =============================================================================
+# PREFLIGHT DATA VALIDATION
+# =============================================================================
+
+covars <- c("breed_season_depth", "recession", "dry_days")
+
+uses_water <- length(base::setdiff(MVGAM_MODELS, "baseline")) > 0L ||
+  any(FABLE_MODELS %in% c("arima_exog", "gam", "tslm"))
+
+preflight_rows <- list()
+
+for (scale in SCALES_TO_RUN) {
+  cfg <- base_config
+  cfg$spatial$level <- scale
+  
+  df <- tibble::as_tibble(
+    get_wading_bird_data(config = cfg, cache = FALSE)
+  )
+  
+  if (!nrow(df)) stop("No observations returned for scale: ", scale)
+  
+  keys <- c("species", if (scale != "system") "region")
+  required <- c(keys, "year", "count")
+  missing <- base::setdiff(required, names(df))
+  
+  if (length(missing)) {
+    stop(scale, " data is missing: ", paste(missing, collapse = ", "))
+  }
+  
+  assert_unique_rows(df, c(keys, "year"), paste(scale, "data"))
+  
+  if (anyNA(df[keys])) stop("Missing series keys at scale: ", scale)
+  
+  if (!is.numeric(df$count) || any(!is.finite(df$count))) {
+    stop("Counts must be finite numeric values at scale: ", scale)
+  }
+  
+  if (!is.numeric(df$year) ||
+      any(!is.finite(df$year)) ||
+      any(df$year != floor(df$year))) {
+    stop("Years must be finite integers at scale: ", scale)
+  }
+  
+  if (uses_water) {
+    missing <- base::setdiff(covars, names(df))
+    
+    if (length(missing)) {
+      stop(scale, " data is missing covariates: ",
+           paste(missing, collapse = ", "))
+    }
+    
+    for (v in covars) {
+      if (!is.numeric(df[[v]]) || any(!is.finite(df[[v]]))) {
+        stop(
+          "Invalid water covariate ", v, " at scale ", scale,
+          ". Check water coverage and region exclusions."
+        )
+      }
+    }
+  }
+  
+  # Check complete calendar panels before fitting.
+  expected_years <- seq.int(min(df$year), max(df$year))
+  
+  panels <- df |>
+    dplyr::group_by(dplyr::across(dplyr::all_of(keys))) |>
+    dplyr::summarise(
+      complete = base::setequal(year, expected_years),
+      .groups = "drop"
+    )
+  
+  if (any(!panels$complete)) {
+    stop("Incomplete calendar panel at scale: ", scale)
+  }
+  
+  if (length(expected_years) <
+      base_config$train_years + FORECAST_HORIZON) {
+    stop("Insufficient calendar years at scale: ", scale)
+  }
+  
+  disk_save_rds(
+    df,
+    file.path(scale_run_folder, paste0("preflight_data_", scale, ".rds"))
+  )
+  
+  preflight_rows[[scale]] <- tibble::tibble(
+    scale = scale,
+    rows = nrow(df),
+    series = nrow(panels),
+    first_year = min(df$year),
+    last_year = max(df$year)
+  )
+  
+  rm(df, panels)
+  gc(verbose = FALSE)
+}
+
+preflight <- dplyr::bind_rows(preflight_rows)
+
+utils::write.csv(
+  preflight,
+  file.path(scale_run_folder, "preflight_manifest.csv"),
+  row.names = FALSE
+)
+
+# main.R determines windows from each dataset's full calendar range.
+# Require identical ranges rather than silently matching unequal windows.
+if (dplyr::n_distinct(preflight$first_year) != 1L ||
+    dplyr::n_distinct(preflight$last_year) != 1L) {
+  stop(
+    "Selected scales have different calendar ranges. ",
+    "Align them in data preparation before making scale comparisons."
+  )
+}
+
+log_line("\nPreflight validation passed.")
+print(preflight)
+
+# =============================================================================
+# CHECKED RESULT COPYING
+# =============================================================================
+
+copy_run_files <- function(from, to) {
+  from <- normalizePath(from, winslash = "/", mustWork = TRUE)
+  
+  files <- list.files(
+    from,
+    recursive = TRUE,
+    full.names = TRUE,
+    all.files = TRUE,
+    no.. = TRUE
+  )
+  
+  files <- files[!file.info(files)$isdir]
+  
+  if (!length(files)) stop("Run directory is empty: ", from)
+  if (dir.exists(to)) stop("Destination already exists: ", to)
+  
+  disk_create_dir(to)
+  relative <- substring(files, nchar(from) + 2L)
+  destinations <- file.path(to, relative)
+  
+  for (i in seq_along(files)) {
+    disk_create_dir(dirname(destinations[i]))
+    
+    if (!isTRUE(file.copy(
+      files[i], destinations[i], overwrite = FALSE
+    ))) {
+      stop("Failed to copy: ", files[i])
+    }
+  }
+  
+  if (!identical(
+    unname(tools::md5sum(files)),
+    unname(tools::md5sum(destinations))
+  )) {
+    stop("Checksum verification failed for copied run: ", to)
+  }
+  
+  invisible(to)
+}
+
+# =============================================================================
+# MODEL LIST AND METRIC READER
 # =============================================================================
 
 models_to_test <- list()
 
-if (base_config$run_mvgam) {
-  for (m in MVGAM_MODELS)
-    models_to_test[[paste0("mvgam_", m)]] <- list(framework = "mvgam", model = m)
-}
-if (base_config$run_fable) {
-  for (m in FABLE_MODELS)
-    models_to_test[[paste0("fable_", m)]] <- list(framework = "fable", model = m)
+for (model in MVGAM_MODELS) {
+  models_to_test[[paste0("mvgam_", model)]] <- list(
+    framework = "mvgam",
+    model = model
+  )
 }
 
-if (!length(models_to_test)) {
-  stop("No models specified. Add models to MVGAM_MODELS or FABLE_MODELS.")
+for (model in FABLE_MODELS) {
+  models_to_test[[paste0("fable_", model)]] <- list(
+    framework = "fable",
+    model = model
+  )
 }
 
-cat("Models to test:", length(models_to_test), "\n")
-for (mk in names(models_to_test)) cat("  •", mk, "\n")
-cat("\n")
-
-# =============================================================================
-# PART 1: RUN EACH MODEL ACROSS ALL SCALES
-# =============================================================================
-
-run_single_model <- function(model_key) {
+read_framework_metrics <- function(folder, framework) {
+  filename <- file.path(folder, "metrics_only.rds")
   
-  model_info <- models_to_test[[model_key]]
-  framework  <- model_info$framework
-  model_name <- model_info$model
-  
-  cat("\n", paste(rep("=", 80), collapse = ""), "\n", sep = "")
-  cat(glue("TESTING MODEL: {model_key}\n"))
-  cat(paste(rep("=", 80), collapse = ""), "\n\n")
-  
-  model_folder <- file.path(scale_run_folder, model_key)
-  dir.create(model_folder, recursive = TRUE, showWarnings = FALSE)
-  
-  model_scale_results <- list()
-  
-  for (current_scale in SCALES_TO_RUN) {
+  if (file.exists(filename)) {
+    metrics <- readRDS(filename)[[framework]]
+  } else {
+    filename <- file.path(folder, "forecast_results.rds")
     
-    cat("\n", paste(rep("-", 60), collapse = ""), "\n", sep = "")
-    cat(glue("  Scale: {toupper(current_scale)}\n"))
-    cat(paste(rep("-", 60), collapse = ""), "\n\n")
-    
-    # Build a fresh config for this model × scale combination.
-    cfg                       <- base_config
-    cfg$spatial$level         <- current_scale
-    cfg$spatial$run_by_region <- current_scale != "system"
-    cfg$parallel$enabled      <- FALSE
-    cfg$model_key             <- model_key
-    
-    if (framework == "mvgam") {
-      # Always include baseline so skill scores are computed.
-      cfg$models$mvgam <- c("baseline", model_name)
-      cfg$models$fable <- character()
-      cfg$run_mvgam    <- TRUE
-      cfg$run_fable    <- FALSE
-    } else {
-      cfg$models$fable <- c("baseline", model_name)
-      cfg$models$mvgam <- character()
-      cfg$run_mvgam    <- FALSE
-      cfg$run_fable    <- TRUE
+    if (!file.exists(filename)) {
+      stop("No metrics/results file found in: ", folder)
     }
     
-    # Publish CONFIG so run_forecasting_pipeline() picks it up without
-    # calling config::get() again.
+    result <- readRDS(filename)
+    metrics <- result[[framework]]$metrics
+  }
+  
+  if (!is.data.frame(metrics)) return(tibble::tibble())
+  
+  metrics <- tibble::as_tibble(metrics)
+  
+  if (".model" %in% names(metrics) &&
+      !"model" %in% names(metrics)) {
+    metrics <- dplyr::rename(metrics, model = .model)
+  }
+  
+  metrics
+}
+
+# =============================================================================
+# RUN MODELS SEQUENTIALLY
+# =============================================================================
+
+all_model_results <- setNames(
+  vector("list", length(models_to_test)),
+  names(models_to_test)
+)
+
+run_records <- list()
+
+for (model_key in names(models_to_test)) {
+  info <- models_to_test[[model_key]]
+  model_folder <- file.path(scale_run_folder, model_key)
+  disk_create_dir(model_folder)
+  
+  all_model_results[[model_key]] <- list()
+  
+  for (scale in SCALES_TO_RUN) {
+    log_line("\nRunning ", model_key, " at ", scale)
+    
+    cfg <- base_config
+    cfg$spatial$level <- scale
+    cfg$spatial$run_by_region <- RUN_BY_REGION && scale != "system"
+    cfg$model_key <- model_key
+    
+    cfg$models$mvgam <- character()
+    cfg$models$fable <- character()
+    cfg$models[[info$framework]] <- unique(c("baseline", info$model))
+    
+    cfg$run_mvgam <- info$framework == "mvgam"
+    cfg$run_fable <- info$framework == "fable"
+    
     assign("CONFIG", cfg, envir = .GlobalEnv)
     
-    run_succeeded <- FALSE
-    run_folder    <- NULL
+    # Remove stale globals from previous runs before launching main.R.
+    for (name in c("run_folder", "results")) {
+      if (exists(name, envir = .GlobalEnv, inherits = FALSE)) {
+        rm(list = name, envir = .GlobalEnv)
+      }
+    }
     
-    tryCatch({
-      # run_forecasting_pipeline() sources model files and evaluation.R
-      # internally, then publishes run_folder to .GlobalEnv.
+    started <- Sys.time()
+    failure <- NA_character_
+    source_folder <- NA_character_
+    destination <- NA_character_
+    status <- "failed"
+    
+    set.seed(SEED)
+    
+    completed <- tryCatch({
       run_forecasting_pipeline()
       
-      run_folder <- tryCatch(
-        base::get("run_folder", envir = .GlobalEnv, inherits = FALSE),
-        error = function(e) NULL
+      source_folder <- base::get(
+        "run_folder", envir = .GlobalEnv, inherits = FALSE
       )
       
-      if (is.null(run_folder)) {
-        stop("run_forecasting_pipeline() completed but run_folder was not set.")
-      }
-      if (!dir.exists(run_folder)) {
-        stop(glue("run_folder does not exist: {run_folder}"))
+      if (!dir.exists(source_folder)) {
+        stop("Pipeline output directory does not exist.")
       }
       
-      rds_path <- file.path(run_folder, "forecast_results.rds")
-      if (!file.exists(rds_path)) {
-        stop(glue("forecast_results.rds missing from: {run_folder}"))
+      metrics <- read_framework_metrics(source_folder, info$framework)
+      
+      if (!nrow(metrics) ||
+          !"model" %in% names(metrics) ||
+          !info$model %in% metrics$model) {
+        stop("No metric rows returned for requested model: ", info$model)
       }
       
-      run_succeeded <- TRUE
-      
+      TRUE
     }, error = function(e) {
-      cat(glue("\n  ✗ {model_key} at {current_scale} FAILED\n"))
-      cat(glue("    Reason: {e$message}\n"))
+      failure <<- conditionMessage(e)
+      FALSE
     })
     
-    if (run_succeeded && !is.null(run_folder)) {
-      
-      dest_folder   <- file.path(model_folder, current_scale)
-      files_to_copy <- list.files(run_folder, full.names = TRUE, recursive = TRUE)
-      
-      if (!length(files_to_copy)) {
-        cat(glue("  ⚠  run_folder is empty: {run_folder}\n"))
-        model_scale_results[[current_scale]] <- NULL
-      } else {
-        for (src_file in files_to_copy) {
-          rel_path  <- fs::path_rel(src_file, start = run_folder)
-          dest_file <- file.path(dest_folder, rel_path)
-          dir.create(dirname(dest_file), recursive = TRUE, showWarnings = FALSE)
-          file.copy(src_file, dest_file, overwrite = TRUE)
-        }
-        
-        model_scale_results[[current_scale]] <- dest_folder
-        unlink(run_folder, recursive = TRUE)
-        cat(glue("  ✓ Results saved to: {dest_folder}\n"))
-      }
-      
-    } else {
-      
-      fail_log <- file.path(model_folder, glue("FAILED_{current_scale}.txt"))
-      writeLines(c(
-        glue("Model  : {model_key}"),
-        glue("Scale  : {current_scale}"),
-        glue("Time   : {format(Sys.time())}"),
-        glue("Folder : {run_folder %||% 'not set'}"),
-        "",
-        "Check that run_forecasting_pipeline() completes without error."
-      ), fail_log)
-      
-      cat(glue("  ✗ Failure logged to: {fail_log}\n"))
-      model_scale_results[[current_scale]] <- NULL
+    # Recover this run's directory even if the pipeline failed.
+    if (is.na(source_folder) &&
+        exists("run_folder", envir = .GlobalEnv, inherits = FALSE)) {
+      source_folder <- base::get(
+        "run_folder", envir = .GlobalEnv, inherits = FALSE
+      )
     }
+    
+    if (completed) {
+      destination <- file.path(model_folder, scale)
+      
+      # Copy errors are fatal. Original files remain untouched.
+      copy_run_files(source_folder, destination)
+      
+      all_model_results[[model_key]][[scale]] <- destination
+      status <- "completed"
+      
+      log_line("Verified copy: ", destination)
+      log_line("Original retained: ", source_folder)
+    } else {
+      writeLines(
+        c(
+          paste("Model:", model_key),
+          paste("Scale:", scale),
+          paste("Error:", failure),
+          paste("Retained source directory:", source_folder)
+        ),
+        file.path(model_folder, paste0("FAILED_", scale, ".txt"))
+      )
+      
+      log_line("FAILED: ", failure)
+    }
+    
+    run_records[[length(run_records) + 1L]] <- tibble::tibble(
+      model_key = model_key,
+      scale = scale,
+      status = status,
+      source_directory = source_folder,
+      result_directory = destination,
+      elapsed_seconds = as.numeric(
+        difftime(Sys.time(), started, units = "secs")
+      ),
+      error = failure
+    )
+    
+    utils::write.csv(
+      dplyr::bind_rows(run_records),
+      file.path(scale_run_folder, "run_manifest.csv"),
+      row.names = FALSE
+    )
+    
+    disk_save_rds(
+      all_model_results,
+      file.path(scale_run_folder, "result_paths.rds")
+    )
     
     gc(verbose = FALSE)
   }
-  
-  cat(glue("\n✓ {model_key} complete\n"))
-  succeeded <- names(Filter(Negate(is.null), model_scale_results))
-  failed    <- setdiff(SCALES_TO_RUN, succeeded)
-  if (length(succeeded)) cat(glue("  ✓ Succeeded: {paste(succeeded, collapse = ', ')}\n"))
-  if (length(failed))    cat(glue("  ✗ Failed   : {paste(failed,    collapse = ', ')}\n"))
-  
-  model_scale_results
 }
-
-# -----------------------------------------------------------------------------
-# Run models — parallel or sequential
-# -----------------------------------------------------------------------------
-
-if (PARALLEL) {
-  all_model_results <- run_models_parallel(
-    model_keys = names(models_to_test),
-    run_fn     = run_single_model,
-    workers    = PARALLEL_WORKERS
-  )
-} else {
-  all_model_results           <- lapply(names(models_to_test), run_single_model)
-  names(all_model_results)    <- names(models_to_test)
-}
-
-cat("\n✓ ALL MODEL RUNS COMPLETE\n\n")
 
 # =============================================================================
-# PART 2: EXTRACT PER-WINDOW SKILL AND COMPUTE SCALE DELTAS
+# EXTRACT RAW WINDOW SKILL
 # =============================================================================
 
-cat("Extracting per-window skill scores...\n\n")
+metric_parts <- list()
 
-extract_model_metrics <- function(folder_path, scale_name, framework) {
-  file_path <- file.path(folder_path, "forecast_results.rds")
-  if (!file.exists(file_path)) return(NULL)
+for (model_key in names(all_model_results)) {
+  info <- models_to_test[[model_key]]
   
-  res <- readRDS(file_path)
-  
-  if (framework == "mvgam") {
-    if (is.null(res$mvgam) || is.null(res$mvgam$metrics)) return(NULL)
-    metrics <- res$mvgam$metrics
-  } else {
-    if (is.null(res$fable) || is.null(res$fable$metrics)) return(NULL)
-    # Fable uses .model; rename to match mvgam convention.
-    metrics <- dplyr::rename(res$fable$metrics, model = .model)
-  }
-  
-  if (!"model" %in% names(metrics)) {
-    warning(glue(
-      "No 'model' column in metrics for scale={scale_name}. ",
-      "All CV windows likely failed. Skipping."
-    ))
-    return(NULL)
-  }
-  
-  if (!"window" %in% names(metrics)) {
-    warning(glue("No 'window' column in metrics for scale={scale_name}. Skipping."))
-    return(NULL)
-  }
-  
-  metrics |>
-    tibble::as_tibble() |>
-    dplyr::select(
-      dplyr::any_of(c(
-        "model", "species", "region",
-        "window", "test_start",
-        "crps_skill", "rps_skill", "rmse_skill"
-      ))
-    ) |>
-    dplyr::mutate(framework = framework, scale = scale_name)
-}
-
-all_window_metrics <- dplyr::bind_rows(lapply(names(all_model_results), function(model_key) {
-  model_info    <- models_to_test[[model_key]]
-  framework     <- model_info$framework
-  model_name    <- model_info$model
-  model_folders <- all_model_results[[model_key]]
-  
-  dplyr::bind_rows(lapply(names(model_folders), function(scale) {
-    folder <- model_folders[[scale]]
-    if (is.null(folder)) return(NULL)
-    m <- extract_model_metrics(folder, scale, framework)
-    if (is.null(m)) return(NULL)
-    dplyr::filter(m, model == model_name) |>
-      dplyr::mutate(model_key = model_key)
-  }))
-}))
-
-if (is.null(all_window_metrics) || !nrow(all_window_metrics)) {
-  warning("No window-level metrics found. Skipping delta computation.")
-} else {
-  
-  skill_metrics  <- intersect(
-    c("crps_skill", "rps_skill", "rmse_skill"),
-    names(all_window_metrics)
-  )
-  has_test_start <- "test_start" %in% names(all_window_metrics)
-  
-  window_long <- all_window_metrics |>
-    tidyr::pivot_longer(
-      cols      = dplyr::all_of(skill_metrics),
-      names_to  = "metric",
-      values_to = "skill_score"
-    ) |>
-    dplyr::filter(!is.na(skill_score)) |>
-    dplyr::mutate(
-      skill_score  = pmax(skill_score, -1),
-      metric_label = dplyr::case_when(
-        metric == "crps_skill" ~ "CRPS Skill",
-        metric == "rps_skill"  ~ "RPS Skill",
-        metric == "rmse_skill" ~ "RMSE Skill",
-        TRUE ~ metric
-      ),
-      window_start_year = extract_window_start_year(
-        window,
-        if (has_test_start) test_start else NULL
+  for (scale in names(all_model_results[[model_key]])) {
+    folder <- all_model_results[[model_key]][[scale]]
+    metrics <- read_framework_metrics(folder, info$framework)
+    
+    if (!nrow(metrics)) next
+    
+    required <- c("model", "species", "test_start")
+    missing <- base::setdiff(required, names(metrics))
+    
+    if (length(missing)) {
+      warning(
+        "Skipping metrics missing required columns: ",
+        paste(missing, collapse = ", "),
+        " in ", folder,
+        call. = FALSE
       )
-    )
-  
-  utils::write.csv(
-    window_long,
-    file.path(scale_run_folder, "window_skill_all_scales.csv"),
-    row.names = FALSE
-  )
-  cat("  ✓ Saved: window_skill_all_scales.csv\n")
-  
-  all_scale_colors <- c(colony = "#00B050", subregion = "#FF0000", system = "#0000FF")
-  scale_colors     <- all_scale_colors[SCALES_TO_RUN]
-  
-  # ===========================================================================
-  # PER-MODEL: window skill plot + delta plot
-  # ===========================================================================
-  
-  for (mk in names(all_model_results)) {
-    
-    model_folder <- file.path(scale_run_folder, mk)
-    cat(glue("\nGenerating window plots for {mk}...\n"))
-    
-    model_long <- window_long |>
-      dplyr::filter(model_key == mk) |>
-      dplyr::mutate(scale = factor(scale, levels = SCALES_TO_RUN))
-    
-    if (!nrow(model_long)) {
-      cat(glue("  ⚠  No data for {mk}, skipping.\n"))
       next
     }
     
-    model_long <- dplyr::mutate(
-      model_long,
-      entity = if (!FORECAST_TOTALS && "species" %in% names(model_long)) {
-        species
-      } else {
-        "Total"
-      }
+    metrics <- metrics |>
+      dplyr::filter(model == info$model)
+    
+    if (!nrow(metrics)) next
+    
+    skill_columns <- base::intersect(
+      c("crps_skill", "rmse_skill", "rps_skill"),
+      names(metrics)
     )
     
-    year_breaks <- sort(unique(model_long$window_start_year))
+    if (!length(skill_columns)) next
     
-    p_window <- ggplot2::ggplot(
-      model_long,
-      ggplot2::aes(
-        x = window_start_year, y = skill_score,
-        color = scale, group = scale
-      )
-    ) +
-      ggplot2::geom_hline(
-        yintercept = 0, linetype = "dashed",
-        color = "gray50", linewidth = 0.7
-      ) +
-      ggplot2::geom_line(linewidth = 0.9, alpha = 0.8) +
-      ggplot2::geom_point(size = 2.5, alpha = 0.9) +
-      ggplot2::facet_grid(entity ~ metric_label, scales = "free_y") +
-      ggplot2::scale_color_manual(values = scale_colors) +
-      ggplot2::scale_x_continuous(
-        name = "Forecast Window Start Year", breaks = year_breaks
-      ) +
-      ggplot2::theme_classic(base_size = 12) +
-      ggplot2::labs(
-        title    = glue("{mk}: Skill Score per Sliding Window"),
-        subtitle = "Each point = one CV window | coloured by spatial scale",
-        y        = "Skill Score (vs Baseline)",
-        color    = "Scale"
-      ) +
-      ggplot2::theme(
-        legend.position  = "bottom",
-        axis.text.x      = ggplot2::element_text(angle = 45, hjust = 1, size = 9),
-        strip.background = ggplot2::element_rect(fill = "grey90", color = NA),
-        strip.text       = ggplot2::element_text(face = "bold", size = 10),
-        plot.title       = ggplot2::element_text(face = "bold", size = 14),
-        plot.subtitle    = ggplot2::element_text(size = 11, color = "gray40")
-      )
-    
-    ggplot2::ggsave(
-      file.path(model_folder, "window_skill_by_scale.png"),
-      p_window,
-      width  = max(10, length(year_breaks) * 0.7),
-      height = max(6,  dplyr::n_distinct(model_long$entity) * 2.5),
-      dpi    = 300
-    )
-    cat(glue("  ✓ Saved: {mk}/window_skill_by_scale.png\n"))
-    
-    # -------------------------------------------------------------------------
-    # DELTA: system - subregion per window
-    # -------------------------------------------------------------------------
-    
-    available_scales <- as.character(unique(model_long$scale))
-    if (!all(c("system", "subregion") %in% available_scales)) {
-      cat(glue("  ⚠  Both system and subregion needed for delta — skipping {mk}.\n"))
-      next
-    }
-    
-    delta_id_cols <- intersect(
-      c("model_key",
-        if (!FORECAST_TOTALS) "species",
-        "entity", "window", "window_start_year", "test_start",
-        "metric", "metric_label"),
-      names(model_long)
-    )
-    
-    delta_df <- model_long |>
-      dplyr::filter(scale %in% c("system", "subregion")) |>
-      dplyr::group_by(dplyr::across(dplyr::all_of(c(delta_id_cols, "scale")))) |>
-      dplyr::summarise(skill_score = mean(skill_score, na.rm = TRUE), .groups = "drop") |>
-      tidyr::pivot_wider(
-        id_cols     = dplyr::all_of(delta_id_cols),
-        names_from  = scale,
-        values_from = skill_score,
-        values_fn   = mean
+    metric_parts[[length(metric_parts) + 1L]] <- metrics |>
+      dplyr::select(
+        dplyr::any_of(c(
+          "model", "species", "region", "window",
+          "test_start", ".type",
+          skill_columns
+        ))
       ) |>
-      dplyr::filter(!is.na(system), !is.na(subregion)) |>
-      dplyr::mutate(delta_skill = system - subregion)
-    
-    if (!nrow(delta_df)) {
-      cat(glue("  ⚠  Delta table empty for {mk} — skipping.\n"))
-      next
-    }
-    
-    year_breaks_delta <- sort(unique(delta_df$window_start_year))
-    
-    p_delta <- ggplot2::ggplot(
-      delta_df,
-      ggplot2::aes(
-        x = window_start_year, y = delta_skill,
-        color = metric_label, group = metric_label
+      tidyr::pivot_longer(
+        cols = dplyr::all_of(skill_columns),
+        names_to = "metric",
+        values_to = "skill_score"
+      ) |>
+      dplyr::mutate(
+        model_key = .env$model_key,
+        framework = .env$info$framework,
+        scale = .env$scale,
+        metric_label = dplyr::case_when(
+          metric == "crps_skill" ~ "CRPS Skill",
+          metric == "rmse_skill" ~ "RMSE Skill",
+          metric == "rps_skill" ~ "RPS Skill",
+          TRUE ~ metric
+        )
       )
-    ) +
-      ggplot2::geom_hline(
-        yintercept = 0, linetype = "dashed",
-        color = "gray50", linewidth = 0.7
-      ) +
-      ggplot2::geom_line(linewidth = 1, alpha = 0.8) +
-      ggplot2::geom_point(size = 2.5) +
-      ggplot2::facet_wrap(~entity, ncol = 2, scales = "free_y") +
-      ggplot2::scale_color_brewer(palette = "Dark2") +
-      ggplot2::scale_x_continuous(
-        name = "Forecast Window Start Year", breaks = year_breaks_delta
-      ) +
-      ggplot2::theme_classic(base_size = 12) +
-      ggplot2::labs(
-        title    = glue("{mk}: Skill Delta per Window (System \u2212 Subregion)"),
-        subtitle = "Positive = system wins | Negative = subregion wins",
-        y        = "\u0394 Skill Score (system \u2212 subregion)",
-        color    = "Metric"
-      ) +
-      ggplot2::theme(
-        legend.position  = "bottom",
-        axis.text.x      = ggplot2::element_text(angle = 45, hjust = 1, size = 9),
-        strip.background = ggplot2::element_rect(fill = "grey90", color = NA),
-        strip.text       = ggplot2::element_text(face = "bold", size = 10),
-        plot.title       = ggplot2::element_text(face = "bold", size = 14),
-        plot.subtitle    = ggplot2::element_text(size = 11, color = "gray40")
-      )
-    
-    ggplot2::ggsave(
-      file.path(model_folder, "window_delta_skill.png"),
-      p_delta,
-      width  = max(10, length(year_breaks_delta) * 0.7),
-      height = max(6,  dplyr::n_distinct(delta_df$entity) * 2.5),
-      dpi    = 300
+  }
+}
+
+window_long <- dplyr::bind_rows(metric_parts)
+
+utils::write.csv(
+  window_long,
+  file.path(scale_run_folder, "window_skill_all_scales.csv"),
+  row.names = FALSE
+)
+
+# =============================================================================
+# SCALE MEANS, DELTAS, AND SUMMARY
+# =============================================================================
+
+scale_means <- tibble::tibble()
+cross_delta <- tibble::tibble()
+overall_summary <- tibble::tibble()
+
+if (nrow(window_long)) {
+  # Retain invalid scores in the raw CSV; use only finite values in summaries.
+  finite_rows <- window_long |>
+    dplyr::filter(
+      is.finite(skill_score),
+      !is.na(test_start)
     )
-    cat(glue("  ✓ Saved: {mk}/window_delta_skill.png\n"))
+  
+  if (nrow(finite_rows)) {
+    group_keys <- c(
+      "model_key", "framework", "species",
+      "test_start", "metric", "metric_label", "scale",
+      base::intersect(".type", names(finite_rows))
+    )
     
+    scale_means <- finite_rows |>
+      dplyr::group_by(
+        dplyr::across(dplyr::all_of(group_keys))
+      ) |>
+      dplyr::summarise(
+        skill_score = mean(skill_score),
+        n_metric_rows = dplyr::n(),
+        .groups = "drop"
+      )
+    
+    # Coverage counts help identify comparisons affected by failed regions.
     utils::write.csv(
-      delta_df,
-      file.path(model_folder, "window_delta_skill.csv"),
+      scale_means,
+      file.path(scale_run_folder, "window_skill_scale_means.csv"),
       row.names = FALSE
     )
-    cat(glue("  ✓ Saved: {mk}/window_delta_skill.csv\n"))
-  }
-  
-  # ===========================================================================
-  # CROSS-MODEL DELTA PLOTS
-  # ===========================================================================
-  
-  cross_delta <- NULL
-  
-  if (all(c("system", "subregion") %in% SCALES_TO_RUN)) {
     
-    cat("\nGenerating cross-model delta plots...\n")
+    overall_summary <- scale_means |>
+      dplyr::group_by(model_key, framework, scale, metric) |>
+      dplyr::summarise(
+        mean_skill = mean(skill_score),
+        median_skill = stats::median(skill_score),
+        n_window_rows = dplyr::n(),
+        .groups = "drop"
+      )
     
-    cross_id_cols <- intersect(
-      c("model_key",
-        if (!FORECAST_TOTALS) "species",
-        "window", "window_start_year", "test_start",
-        "metric", "metric_label"),
-      names(window_long)
+    utils::write.csv(
+      overall_summary,
+      file.path(scale_run_folder, "all_models_summary.csv"),
+      row.names = FALSE
     )
     
-    cross_delta <- window_long |>
-      dplyr::filter(scale %in% c("system", "subregion")) |>
-      dplyr::group_by(dplyr::across(dplyr::all_of(c(cross_id_cols, "scale")))) |>
-      dplyr::summarise(skill_score = mean(skill_score, na.rm = TRUE), .groups = "drop") |>
-      tidyr::pivot_wider(
-        id_cols     = dplyr::all_of(cross_id_cols),
-        names_from  = scale,
-        values_from = skill_score,
-        values_fn   = mean
-      ) |>
-      dplyr::filter(!is.na(system), !is.na(subregion)) |>
-      dplyr::mutate(
-        delta_skill = system - subregion,
-        entity      = if (!FORECAST_TOTALS && "species" %in% names(cross_delta %||% .)) {
-          species
-        } else {
-          "Total"
-        }
-      )
-    
-    # Safer entity assignment after the pipe
-    if (!"entity" %in% names(cross_delta)) {
-      cross_delta$entity <- if (!FORECAST_TOTALS && "species" %in% names(cross_delta)) {
-        cross_delta$species
-      } else {
-        "Total"
-      }
-    }
-    
-    if (nrow(cross_delta) > 0L) {
+    if (all(c("system", "subregion") %in% SCALES_TO_RUN)) {
+      delta_keys <- base::setdiff(group_keys, "scale")
       
-      cross_year_breaks <- sort(unique(cross_delta$window_start_year))
-      
-      # ggside version — faceted with marginal density
-      p_cross <- ggplot2::ggplot(
-        cross_delta,
-        ggplot2::aes(
-          x = window_start_year, y = delta_skill,
-          color = model_key, group = model_key
+      cross_delta <- scale_means |>
+        dplyr::filter(scale %in% c("system", "subregion")) |>
+        dplyr::select(
+          dplyr::all_of(delta_keys),
+          scale, skill_score
+        ) |>
+        tidyr::pivot_wider(
+          id_cols = dplyr::all_of(delta_keys),
+          names_from = scale,
+          values_from = skill_score
         )
-      ) +
-        ggplot2::geom_hline(
-          yintercept = 0, linetype = "dashed",
-          color = "gray50", linewidth = 0.7
-        ) +
-        ggplot2::geom_line(linewidth = 0.9, alpha = 0.8) +
-        ggplot2::geom_point(size = 2, alpha = 0.9) +
-        ggside::geom_ysidedensity(
-          ggplot2::aes(x = ggplot2::after_stat(density), fill = model_key),
-          alpha     = 0.20,
-          linewidth = 0.7,
-          position  = "identity"
-        ) +
-        ggplot2::facet_grid(entity ~ metric_label, scales = "free_y") +
-        ggside::ggside(scales = "free", y.pos = "right") +
-        ggplot2::scale_x_continuous(
-          name = "Forecast Window Start Year", breaks = cross_year_breaks
-        ) +
-        ggplot2::scale_color_brewer(palette = "Dark2") +
-        ggplot2::scale_fill_brewer(palette  = "Dark2") +
-        ggplot2::theme_classic(base_size = 12) +
-        ggplot2::labs(
-          title    = "All Models: Skill Delta (System \u2212 Subregion)",
-          subtitle = paste0(
-            "Positive = system wins | Negative = subregion wins\n",
-            "Right strip = marginal distribution of \u0394 skill"
-          ),
-          y     = "\u0394 Skill Score",
-          color = "Model",
-          fill  = "Model"
-        ) +
-        ggplot2::theme(
-          legend.position    = "bottom",
-          axis.text.x        = ggplot2::element_text(angle = 45, hjust = 1, size = 9),
-          strip.background   = ggplot2::element_rect(fill = "grey90", color = NA),
-          strip.text         = ggplot2::element_text(face = "bold", size = 10),
-          plot.title         = ggplot2::element_text(face = "bold", size = 14),
-          plot.subtitle      = ggplot2::element_text(size = 11, color = "gray40"),
-          ggside.panel.scale = 0.20
-        ) +
-        ggside::theme_ggside_void()
       
-      ggplot2::ggsave(
-        file.path(scale_run_folder, "all_models_window_delta.png"),
-        p_cross,
-        width  = max(14, length(cross_year_breaks) * 0.7),
-        height = max(8,  dplyr::n_distinct(cross_delta$entity) * 2.5),
-        dpi    = 300
-      )
-      cat("  ✓ Saved: all_models_window_delta.png\n")
+      for (scale in c("system", "subregion")) {
+        if (!scale %in% names(cross_delta)) {
+          cross_delta[[scale]] <- rep(NA_real_, nrow(cross_delta))
+        }
+      }
+      
+      cross_delta <- cross_delta |>
+        dplyr::filter(is.finite(system), is.finite(subregion)) |>
+        dplyr::mutate(delta_skill = system - subregion)
       
       utils::write.csv(
         cross_delta,
         file.path(scale_run_folder, "all_models_window_delta.csv"),
         row.names = FALSE
       )
-      cat("  ✓ Saved: all_models_window_delta.csv\n")
-      
-      # ggExtra per-panel marginal plots
-      cat("\n  Generating ggExtra per-panel marginal plots...\n")
-      
-      marginal_folder <- file.path(scale_run_folder, "window_delta_marginal")
-      dir.create(marginal_folder, recursive = TRUE, showWarnings = FALSE)
-      
-      for (ent in sort(unique(cross_delta$entity))) {
-        for (met in sort(unique(cross_delta$metric_label))) {
-          
-          df_sub <- dplyr::filter(
-            cross_delta, entity == ent, metric_label == met
-          )
-          if (!nrow(df_sub)) next
-          
-          p_sub <- ggplot2::ggplot(
-            df_sub,
-            ggplot2::aes(
-              x = window_start_year, y = delta_skill,
-              color = model_key, group = model_key
-            )
-          ) +
-            ggplot2::geom_hline(
-              yintercept = 0, linetype = "dashed",
-              color = "gray50", linewidth = 0.7
-            ) +
-            ggplot2::geom_line(linewidth = 0.9, alpha = 0.8) +
-            ggplot2::geom_point(size = 2.5, alpha = 0.9) +
-            ggplot2::scale_x_continuous(
-              name   = "Forecast Window Start Year",
-              breaks = sort(unique(df_sub$window_start_year))
-            ) +
-            ggplot2::scale_color_brewer(palette = "Dark2") +
-            ggplot2::theme_classic(base_size = 12) +
-            ggplot2::labs(
-              title    = glue("Skill Delta: {ent} | {met}"),
-              subtitle = "Positive = system wins | Negative = subregion wins",
-              y        = "\u0394 Skill Score",
-              color    = "Model"
-            ) +
-            ggplot2::theme(
-              legend.position = "bottom",
-              axis.text.x     = ggplot2::element_text(angle = 45, hjust = 1, size = 9),
-              plot.title      = ggplot2::element_text(face = "bold", size = 13),
-              plot.subtitle   = ggplot2::element_text(size = 10, color = "gray40")
-            )
-          
-          p_marginal <- ggExtra::ggMarginal(
-            p_sub,
-            margins     = "y",
-            type        = "density",
-            groupColour = TRUE,
-            groupFill   = TRUE,
-            size        = 4
-          )
-          
-          fname <- glue("{ent}_{met}.png") |>
-            stringr::str_replace_all(" ", "_") |>
-            stringr::str_to_lower()
-          
-          ggplot2::ggsave(
-            file.path(marginal_folder, fname),
-            p_marginal,
-            width  = 12,
-            height = 5,
-            dpi    = 300
-          )
-          cat(glue("    ✓ Saved: window_delta_marginal/{fname}\n"))
-        }
-      }
-      
-      cat("  ✓ All ggExtra marginal plots saved\n")
-      
-      # Density / ECDF / Violin
-      p_density <- ggplot2::ggplot(
-        cross_delta,
-        ggplot2::aes(x = delta_skill, fill = model_key, color = model_key)
-      ) +
-        ggplot2::geom_density(alpha = 0.15, linewidth = 1.1) +
-        ggplot2::geom_vline(
-          xintercept = 0, linetype = "dashed",
-          color = "gray40", linewidth = 0.7
-        ) +
-        ggplot2::facet_wrap(~metric_label, ncol = 1, scales = "free_y") +
-        ggplot2::scale_fill_brewer(palette  = "Dark2") +
-        ggplot2::scale_color_brewer(palette = "Dark2") +
-        ggplot2::theme_classic(base_size = 13) +
-        ggplot2::labs(
-          title    = "All Models: Distribution of Skill Delta",
-          subtitle = "System \u2212 Subregion",
-          x        = "\u0394 Skill Score",
-          y        = "Density",
-          fill     = "Model", color = "Model"
-        ) +
-        ggplot2::theme(
-          legend.position  = "bottom",
-          strip.background = ggplot2::element_rect(fill = "grey90", color = NA),
-          strip.text       = ggplot2::element_text(face = "bold", size = 11),
-          plot.title       = ggplot2::element_text(face = "bold", size = 14)
-        )
-      
-      ggplot2::ggsave(
-        file.path(scale_run_folder, "all_models_delta_density.png"),
-        p_density, width = 10, height = 10, dpi = 300
-      )
-      cat("  ✓ Saved: all_models_delta_density.png\n")
-      
-      p_ecdf <- ggplot2::ggplot(
-        cross_delta,
-        ggplot2::aes(x = delta_skill, color = model_key)
-      ) +
-        ggplot2::stat_ecdf(linewidth = 1.2) +
-        ggplot2::geom_vline(
-          xintercept = 0, linetype = "dashed",
-          color = "gray40", linewidth = 0.7
-        ) +
-        ggplot2::facet_wrap(~metric_label, ncol = 1, scales = "free_x") +
-        ggplot2::scale_color_brewer(palette = "Dark2") +
-        ggplot2::theme_classic(base_size = 13) +
-        ggplot2::labs(
-          title    = "All Models: ECDF of Skill Delta",
-          subtitle = "System \u2212 Subregion",
-          x        = "\u0394 Skill Score",
-          y        = "Cumulative Probability",
-          color    = "Model"
-        ) +
-        ggplot2::theme(
-          legend.position  = "bottom",
-          strip.background = ggplot2::element_rect(fill = "grey90", color = NA),
-          strip.text       = ggplot2::element_text(face = "bold", size = 11),
-          plot.title       = ggplot2::element_text(face = "bold", size = 14)
-        )
-      
-      ggplot2::ggsave(
-        file.path(scale_run_folder, "all_models_delta_ecdf.png"),
-        p_ecdf, width = 10, height = 10, dpi = 300
-      )
-      cat("  ✓ Saved: all_models_delta_ecdf.png\n")
-      
-      p_violin <- ggplot2::ggplot(
-        cross_delta,
-        ggplot2::aes(
-          x = model_key, y = delta_skill,
-          fill = model_key, color = model_key
-        )
-      ) +
-        ggplot2::geom_hline(
-          yintercept = 0, linetype = "dashed",
-          color = "gray40", linewidth = 0.7
-        ) +
-        ggplot2::geom_violin(alpha = 0.3, linewidth = 0.9, trim = FALSE) +
-        ggplot2::geom_boxplot(
-          width = 0.08, alpha = 0.8,
-          outlier.shape = NA, color = "gray20"
-        ) +
-        ggplot2::facet_wrap(~metric_label, ncol = 1, scales = "free_y") +
-        ggplot2::scale_fill_brewer(palette  = "Dark2") +
-        ggplot2::scale_color_brewer(palette = "Dark2") +
-        ggplot2::theme_classic(base_size = 13) +
-        ggplot2::labs(
-          title    = "All Models: Skill Delta Distribution",
-          subtitle = "System \u2212 Subregion | Positive = system wins",
-          x        = NULL,
-          y        = "\u0394 Skill Score",
-          fill     = "Model", color = "Model"
-        ) +
-        ggplot2::theme(
-          legend.position  = "bottom",
-          axis.text.x      = ggplot2::element_text(
-            angle = 45, hjust = 1, face = "bold", size = 10
-          ),
-          strip.background = ggplot2::element_rect(fill = "grey90", color = NA),
-          strip.text       = ggplot2::element_text(face = "bold", size = 11),
-          plot.title       = ggplot2::element_text(face = "bold", size = 14)
-        )
-      
-      ggplot2::ggsave(
-        file.path(scale_run_folder, "all_models_delta_violin.png"),
-        p_violin, width = 12, height = 10, dpi = 300
-      )
-      cat("  ✓ Saved: all_models_delta_violin.png\n")
-      
-    } else {
-      cross_delta <- NULL
     }
   }
-  
-  # ===========================================================================
-  # AGGREGATED CROSS-MODEL SUMMARY
-  # ===========================================================================
-  
-  cat("\nGenerating aggregated cross-model summary...\n")
-  
-  overall_summary <- window_long |>
-    dplyr::group_by(model_key, scale, metric) |>
-    dplyr::summarise(
-      mean_skill   = round(mean(skill_score,   na.rm = TRUE), 3),
-      median_skill = round(median(skill_score, na.rm = TRUE), 3),
-      n            = dplyr::n(),
-      .groups      = "drop"
-    )
-  
-  utils::write.csv(
-    overall_summary,
-    file.path(scale_run_folder, "all_models_summary.csv"),
-    row.names = FALSE
-  )
-  cat("  ✓ Saved: all_models_summary.csv\n")
+} else {
+  warning("No requested-model window metrics were available.", call. = FALSE)
 }
 
 # =============================================================================
-# PART 3: COMBINED FORECAST PDF
+# COMPARISON PLOTS
 # =============================================================================
 
-cat("\nGenerating combined forecast PDF...\n")
+save_plot_safely <- function(plot, filename, width = 12, height = 8) {
+  tryCatch({
+    ggplot2::ggsave(
+      filename,
+      plot = plot,
+      width = width,
+      height = height,
+      dpi = 200,
+      limitsize = FALSE
+    )
+    TRUE
+  }, error = function(e) {
+    warning(
+      "Plot failed: ", filename, ": ", conditionMessage(e),
+      call. = FALSE
+    )
+    FALSE
+  })
+}
 
-DELETE_RAW_AFTER_VALIDATION <- FALSE
+scale_colors <- c(
+  system = "#2166AC",
+  subregion = "#B2182B",
+  colony = "#1B7837"
+)
 
-build_combined_forecast_pdf <- function(root, delete_raw = FALSE) {
-  if (!requireNamespace("pdftools", quietly = TRUE)) {
-    stop("Install pdftools before running PDF generation.")
+if (nrow(scale_means)) {
+  for (model_key in unique(scale_means$model_key)) {
+    plot_data <- scale_means |>
+      dplyr::filter(model_key == .env$model_key)
+    
+    p <- ggplot2::ggplot(
+      plot_data,
+      ggplot2::aes(
+        x = test_start,
+        y = skill_score,
+        colour = scale,
+        group = scale
+      )
+    ) +
+      ggplot2::geom_hline(
+        yintercept = 0, linetype = "dashed", colour = "grey50"
+      ) +
+      ggplot2::geom_line() +
+      ggplot2::geom_point(size = 2) +
+      ggplot2::facet_grid(species ~ metric_label, scales = "free_y") +
+      ggplot2::scale_colour_manual(values = scale_colors) +
+      ggplot2::theme_classic(base_size = 11) +
+      ggplot2::theme(legend.position = "bottom") +
+      ggplot2::labs(
+        title = paste(model_key, "— skill by spatial scale"),
+        subtitle = "Spatial-scale points are means of available regional metric rows",
+        x = "Forecast start year",
+        y = "Skill versus baseline",
+        colour = "Scale"
+      )
+    
+    save_plot_safely(
+      p,
+      file.path(scale_run_folder, model_key, "window_skill_by_scale.png"),
+      height = max(6, dplyr::n_distinct(plot_data$species) * 2)
+    )
+  }
+}
+
+if (nrow(cross_delta)) {
+  for (model_key in unique(cross_delta$model_key)) {
+    plot_data <- cross_delta |>
+      dplyr::filter(model_key == .env$model_key)
+    
+    utils::write.csv(
+      plot_data,
+      file.path(scale_run_folder, model_key, "window_delta_skill.csv"),
+      row.names = FALSE
+    )
+    
+    p <- ggplot2::ggplot(
+      plot_data,
+      ggplot2::aes(
+        x = test_start,
+        y = delta_skill,
+        colour = metric_label,
+        group = metric_label
+      )
+    ) +
+      ggplot2::geom_hline(
+        yintercept = 0, linetype = "dashed", colour = "grey50"
+      ) +
+      ggplot2::geom_line() +
+      ggplot2::geom_point(size = 2) +
+      ggplot2::facet_wrap(~species, scales = "free_y") +
+      ggplot2::theme_classic(base_size = 11) +
+      ggplot2::theme(legend.position = "bottom") +
+      ggplot2::labs(
+        title = paste(model_key, "— system minus mean subregional skill"),
+        subtitle = "Positive: system skill is higher; negative: mean subregional skill is higher",
+        x = "Forecast start year",
+        y = "Skill difference",
+        colour = "Metric"
+      )
+    
+    save_plot_safely(
+      p,
+      file.path(scale_run_folder, model_key, "window_delta_skill.png")
+    )
   }
   
-  root  <- normalizePath(root, winslash = "/", mustWork = TRUE)
+  p_cross <- ggplot2::ggplot(
+    cross_delta,
+    ggplot2::aes(
+      x = test_start,
+      y = delta_skill,
+      colour = model_key,
+      group = model_key
+    )
+  ) +
+    ggplot2::geom_hline(
+      yintercept = 0, linetype = "dashed", colour = "grey50"
+    ) +
+    ggplot2::geom_line() +
+    ggplot2::geom_point(size = 2) +
+    ggplot2::facet_grid(species ~ metric_label, scales = "free_y") +
+    ggplot2::theme_classic(base_size = 11) +
+    ggplot2::theme(legend.position = "bottom") +
+    ggplot2::labs(
+      title = "System minus mean subregional skill",
+      subtitle = "Unclipped scores; comparisons use matching forecast start years",
+      x = "Forecast start year",
+      y = "Skill difference",
+      colour = "Model"
+    )
+  
+  save_plot_safely(
+    p_cross,
+    file.path(scale_run_folder, "all_models_window_delta.png"),
+    width = 14,
+    height = max(7, dplyr::n_distinct(cross_delta$species) * 2)
+  )
+  
+  p_ecdf <- ggplot2::ggplot(
+    cross_delta,
+    ggplot2::aes(x = delta_skill, colour = model_key)
+  ) +
+    ggplot2::stat_ecdf() +
+    ggplot2::geom_vline(
+      xintercept = 0, linetype = "dashed", colour = "grey50"
+    ) +
+    ggplot2::facet_wrap(~metric_label, scales = "free_x") +
+    ggplot2::theme_classic(base_size = 11) +
+    ggplot2::theme(legend.position = "bottom") +
+    ggplot2::labs(
+      title = "Distribution of scale skill differences",
+      x = "System minus mean subregional skill",
+      y = "Empirical cumulative probability",
+      colour = "Model"
+    )
+  
+  save_plot_safely(
+    p_ecdf,
+    file.path(scale_run_folder, "all_models_delta_ecdf.png")
+  )
+}
+
+# =============================================================================
+# OPTIONAL COMBINED FORECAST PDF
+#
+# Each forecast object is rendered into its own PDF fragment.
+# A failed object cannot corrupt successful fragments.
+# Raw files and fragments are retained regardless of success.
+# =============================================================================
+
+build_combined_forecast_pdf <- function(root) {
+  require_package("pdftools")
+  require_package("qpdf")
+  
+  root <- normalizePath(root, winslash = "/", mustWork = TRUE)
+  
   files <- sort(list.files(
     root,
-    pattern    = "^forecast\\.rds$",
-    recursive  = TRUE,
+    pattern = "^forecast\\.rds$",
+    recursive = TRUE,
     full.names = TRUE
   ))
   
   if (!length(files)) {
-    stop("No forecast.rds files found under: ", root)
+    warning("No forecast.rds files found; skipping PDF.", call. = FALSE)
+    return(invisible(NULL))
   }
   
-  final_pdf     <- file.path(root, "all_models_forecasts.pdf")
-  temporary_pdf <- tempfile(
-    pattern = "all_models_forecasts_build_",
-    tmpdir  = root,
-    fileext = ".pdf"
-  )
+  fragment_dir <- file.path(root, "forecast_pdf_fragments")
+  disk_create_dir(fragment_dir)
   
-  device_id <- NULL
-  
-  close_pdf_device <- function() {
-    devices <- grDevices::dev.list()
-    if (!is.null(device_id) && !is.null(devices) && device_id %in% devices) {
-      grDevices::dev.off(which = device_id)
-    }
-    device_id <<- NULL
-    invisible(NULL)
-  }
-  
-  on.exit(close_pdf_device(), add = TRUE)
-  
-  # Parse a forecast.rds path into metadata.
-  # Structure (after copying):
-  #   <root>/<model_key>/<scale>/windows/<location_year>/<framework>/[<model>/]forecast.rds
-  parse_forecast_path <- function(filename) {
-    path     <- normalizePath(filename, winslash = "/", mustWork = TRUE)
-    relative <- substring(path, nchar(root) + 2L)
-    parts    <- strsplit(relative, "/", fixed = TRUE)[[1]]
-    
+  parse_metadata <- function(filename) {
+    relative <- substring(filename, nchar(root) + 2L)
+    parts <- strsplit(relative, "/", fixed = TRUE)[[1L]]
     positions <- which(parts == "windows")
-    if (length(positions) != 1L) stop("Cannot find 'windows' in path: ", path)
+    
+    if (length(positions) != 1L) {
+      stop("Cannot identify windows directory: ", filename)
+    }
     
     w <- positions[1L]
     
-    # Parts before 'windows': model_key, scale
-    if (w < 3L) stop("Unexpected path structure before 'windows': ", path)
-    
-    model_key <- parts[w - 2L]
-    scale     <- parts[w - 1L]
-    window    <- parts[w + 1L]
-    framework <- parts[w + 2L]
-    
-    # mvgam: .../framework/model/forecast.rds  (5 parts after w)
-    # fable: .../framework/forecast.rds         (4 parts after w — no model subdir)
-    model <- if (length(parts) >= w + 4L) parts[w + 3L] else framework
-    
-    window_directory <- file.path(
-      root, paste(parts[seq_len(w + 1L)], collapse = "/")
-    )
+    if (w < 3L || length(parts) < w + 3L) {
+      stop("Unexpected forecast path: ", filename)
+    }
     
     list(
-      relative_file    = relative,
-      model_key        = model_key,
-      scale            = scale,
-      window           = window,
-      framework        = framework,
-      model            = model,
-      window_directory = window_directory
+      source_file = relative,
+      model_key = parts[w - 2L],
+      scale = parts[w - 1L],
+      window = parts[w + 1L],
+      framework = parts[w + 2L],
+      model = if (length(parts) == w + 4L) {
+        parts[w + 3L]
+      } else {
+        parts[w + 2L]
+      },
+      window_directory = file.path(
+        root,
+        paste(parts[seq_len(w + 1L)], collapse = "/")
+      )
     )
   }
   
-  draw_mvgam_page <- function(fc, series_index, heading) {
-    p <- graphics::plot(fc, series = series_index)
+  render_one <- function(filename, fragment) {
+    metadata <- parse_metadata(filename)
+    fc <- readRDS(filename)
+    records <- list()
     
-    if (inherits(p, c("patchwork", "gg"))) {
-      if (inherits(p, "patchwork")) {
-        p <- p + patchwork::plot_annotation(title = heading)
-      } else {
-        p <- p + ggplot2::labs(title = heading) +
-          ggplot2::theme(
-            plot.title = ggplot2::element_text(size = 10, face = "bold")
-          )
+    grDevices::pdf(fragment, width = 12, height = 8, onefile = TRUE)
+    device <- grDevices::dev.cur()
+    
+    on.exit({
+      devices <- grDevices::dev.list()
+      if (!is.null(devices) && device %in% devices) {
+        grDevices::dev.off(which = device)
       }
-      print(p)
-    } else {
-      graphics::mtext(heading, side = 3, line = 0.5, cex = 0.7, adj = 0)
-    }
-    invisible(NULL)
-  }
-  
-  process_file <- function(filename) {
-    metadata   <- parse_forecast_path(filename)
-    fc         <- readRDS(filename)
-    page_rows  <- list()
-    input_files <- character()
+    }, add = TRUE)
     
-    heading_for <- function(series) {
+    heading <- function(model, series) {
       paste0(
         "Scale: ", metadata$scale,
         " | Window: ", metadata$window,
-        "\nModel: ", metadata$model,
+        "\nModel: ", model,
         " | Series: ", series
       )
     }
     
-    add_page <- function(series) {
+    add_record <- function(model, series) {
       tibble::tibble(
-        source_file = metadata$relative_file,
-        model_key   = metadata$model_key,
-        scale       = metadata$scale,
-        window      = metadata$window,
-        framework   = metadata$framework,
-        model       = metadata$model,
-        series      = series
+        source_file = metadata$source_file,
+        model_key = metadata$model_key,
+        scale = metadata$scale,
+        window = metadata$window,
+        framework = metadata$framework,
+        model = model,
+        series = series
       )
     }
     
     if (inherits(fc, "mvgam_forecast")) {
+      require_package("mvgam")
+      
       labels <- as.character(fc$series_names)
       if (!length(labels)) labels <- names(fc$forecasts)
+      
       if (!length(labels) || anyNA(labels)) {
-        stop("Cannot identify forecast series in: ", filename)
+        stop("Cannot identify mvgam forecast series.")
       }
       
-      for (s in seq_along(labels)) {
-        draw_mvgam_page(fc, s, heading_for(labels[s]))
-        page_rows[[length(page_rows) + 1L]] <- add_page(labels[s])
+      for (i in seq_along(labels)) {
+        p <- graphics::plot(fc, series = i)
+        title <- heading(metadata$model, labels[i])
+        
+        if (inherits(p, "patchwork")) {
+          require_package("patchwork")
+          print(p + patchwork::plot_annotation(title = title))
+        } else if (inherits(p, "ggplot")) {
+          print(p + ggplot2::labs(title = title))
+        } else {
+          graphics::mtext(
+            title, side = 3, line = 0.5, cex = 0.65, adj = 0
+          )
+        }
+        
+        records[[length(records) + 1L]] <- add_record(
+          metadata$model, labels[i]
+        )
       }
-      
     } else if (inherits(fc, "fbl_ts")) {
-      train_file <- file.path(metadata$window_directory, "train_data.rds")
-      test_file  <- file.path(metadata$window_directory, "test_data.rds")
+      require_package("fabletools")
+      require_package("tsibble")
       
-      if (!file.exists(train_file) || !file.exists(test_file)) {
-        stop("Missing window input files for: ", filename)
-      }
+      train <- tibble::as_tibble(readRDS(file.path(
+        metadata$window_directory, "train_data.rds"
+      )))
       
-      train       <- tibble::as_tibble(readRDS(train_file))
-      test        <- tibble::as_tibble(readRDS(test_file))
-      input_files <- c(train_file, test_file)
+      test <- tibble::as_tibble(readRDS(file.path(
+        metadata$window_directory, "test_data.rds"
+      )))
       
-      series_keys  <- setdiff(tsibble::key_vars(fc), ".model")
+      keys <- base::setdiff(tsibble::key_vars(fc), ".model")
+      
       combinations <- tibble::as_tibble(fc) |>
-        dplyr::select(dplyr::all_of(c(".model", series_keys))) |>
+        dplyr::select(dplyr::all_of(c(".model", keys))) |>
         dplyr::distinct()
       
-      if (!nrow(combinations)) stop("Fable contains no series: ", filename)
+      if (!nrow(combinations)) stop("No fable forecast combinations.")
       
-      for (j in seq_len(nrow(combinations))) {
-        sel     <- combinations[j, , drop = FALSE]
-        keep_fc <- Reduce(`&`, lapply(names(sel), function(k) {
-          as.character(fc[[k]]) == as.character(sel[[k]][1L])
-        }), rep(TRUE, nrow(fc)))
+      match_rows <- function(df, selected, columns) {
+        keep <- rep(TRUE, nrow(df))
         
-        keep_data <- Reduce(`&`, lapply(series_keys, function(k) {
-          as.character(train[[k]]) == as.character(sel[[k]][1L])
-        }), rep(TRUE, nrow(train)))
+        for (key in columns) {
+          if (!key %in% names(df)) stop("Missing fable key: ", key)
+          
+          keep <- keep &
+            !is.na(df[[key]]) &
+            as.character(df[[key]]) ==
+            as.character(selected[[key]][1L])
+        }
         
-        keep_test <- Reduce(`&`, lapply(series_keys, function(k) {
-          as.character(test[[k]]) == as.character(sel[[k]][1L])
-        }), rep(TRUE, nrow(test)))
+        which(keep)
+      }
+      
+      for (i in seq_len(nrow(combinations))) {
+        selected <- combinations[i, , drop = FALSE]
         
-        fc_one  <- fc[which(keep_fc), ]
+        fc_one <- fc[
+          match_rows(fc, selected, c(".model", keys)), ,
+          drop = FALSE
+        ]
+        
         history <- tsibble::as_tsibble(
-          train[which(keep_data), ],
-          key   = tidyselect::all_of(series_keys),
+          train[match_rows(train, selected, keys), , drop = FALSE],
+          key = tidyselect::all_of(keys),
           index = year
         )
         
-        series_label <- paste(
-          vapply(series_keys, function(k) as.character(sel[[k]][1L]), character(1)),
+        observed <- test[
+          match_rows(test, selected, keys), , drop = FALSE
+        ]
+        
+        model <- as.character(selected$.model[1L])
+        
+        series <- paste(
+          vapply(keys, function(key) {
+            as.character(selected[[key]][1L])
+          }, character(1)),
           collapse = " / "
         )
-        if (!nzchar(series_label)) series_label <- "series"
+        
+        if (!nzchar(series)) series <- "series"
         
         p <- ggplot2::autoplot(fc_one, history, level = c(80, 95)) +
           ggplot2::geom_point(
-            data        = test[which(keep_test), ],
-            mapping     = ggplot2::aes(x = year, y = count),
+            data = observed,
+            mapping = ggplot2::aes(x = year, y = count),
             inherit.aes = FALSE,
-            colour      = "black",
-            size        = 1.8
+            colour = "black"
           ) +
           ggplot2::labs(
-            title = heading_for(series_label),
-            x = "Year", y = "Count"
+            title = heading(model, series),
+            x = "Year",
+            y = "Count"
           ) +
-          ggplot2::theme_classic(base_size = 12) +
-          ggplot2::theme(
-            legend.position = "bottom",
-            plot.title      = ggplot2::element_text(size = 10)
-          )
+          ggplot2::theme_classic(base_size = 11)
         
         print(p)
-        page_rows[[length(page_rows) + 1L]] <- add_page(series_label)
+        
+        records[[length(records) + 1L]] <- add_record(model, series)
       }
-      
     } else {
-      stop(
-        "Unsupported forecast class in ", filename, ": ",
-        paste(class(fc), collapse = ", ")
-      )
+      stop("Unsupported forecast class: ", paste(class(fc), collapse = ", "))
     }
     
-    list(
-      pages       = dplyr::bind_rows(page_rows),
-      input_files = input_files
-    )
+    dplyr::bind_rows(records)
   }
   
-  grDevices::pdf(
-    temporary_pdf,
-    width   = 12,
-    height  = 8,
-    onefile = TRUE,
-    title   = "All Models: Hindcasts and Forecasts"
-  )
-  device_id <- grDevices::dev.cur()
-  
-  page_records <- vector("list", length(files))
-  all_inputs   <- character()
+  fragments <- character()
+  pages <- list()
+  failures <- list()
   
   for (i in seq_along(files)) {
-    cat(sprintf(
-      "  [%d/%d] %s\n", i, length(files),
-      substring(files[i], nchar(root) + 2L)
-    ))
+    log_line("PDF forecast ", i, "/", length(files))
     
-    output           <- process_file(files[i])
-    page_records[[i]] <- output$pages
-    all_inputs        <- unique(c(all_inputs, output$input_files))
+    fragment <- file.path(fragment_dir, sprintf("forecast_%05d.pdf", i))
     
-    rm(output)
+    result <- tryCatch({
+      records <- render_one(files[i], fragment)
+      
+      if (pdftools::pdf_info(fragment)$pages != nrow(records) ||
+          !nrow(records)) {
+        stop("Rendered page count does not match the manifest.")
+      }
+      
+      text <- pdftools::pdf_text(fragment)
+      
+      if (any(!grepl("Scale:", text, fixed = TRUE))) {
+        stop("Rendered pages are missing expected labels.")
+      }
+      
+      records
+    }, error = function(e) {
+      failures[[length(failures) + 1L]] <<- tibble::tibble(
+        source_file = substring(files[i], nchar(root) + 2L),
+        error = conditionMessage(e)
+      )
+      NULL
+    })
+    
+    if (!is.null(result)) {
+      fragments <- c(fragments, fragment)
+      pages[[length(pages) + 1L]] <- result
+    }
+    
     gc(verbose = FALSE)
   }
   
-  close_pdf_device()
+  utils::write.csv(
+    dplyr::bind_rows(failures),
+    file.path(root, "forecast_pdf_failures.csv"),
+    row.names = FALSE
+  )
   
-  manifest       <- dplyr::bind_rows(page_records)
-  expected_pages <- nrow(manifest)
-  actual_pages   <- pdftools::pdf_info(temporary_pdf)$pages
-  
-  if (expected_pages < 1L || actual_pages != expected_pages) {
-    stop(
-      "PDF verification failed: expected ", expected_pages,
-      " pages, found ", actual_pages,
-      ". Raw files retained. Build: ", temporary_pdf
+  if (!length(fragments)) {
+    warning(
+      "No forecasts rendered successfully. Raw forecasts retained.",
+      call. = FALSE
     )
+    return(invisible(NULL))
   }
   
-  page_text <- pdftools::pdf_text(temporary_pdf)
-  if (length(page_text) != expected_pages ||
-      any(!grepl("Scale:", page_text, fixed = TRUE))) {
-    stop(
-      "PDF page-label check failed. Raw files retained. Build: ", temporary_pdf
-    )
+  temporary <- tempfile(tmpdir = root, fileext = ".pdf")
+  final <- file.path(root, "all_models_forecasts.pdf")
+  
+  qpdf::pdf_combine(input = fragments, output = temporary)
+  
+  manifest <- dplyr::bind_rows(pages)
+  actual_pages <- pdftools::pdf_info(temporary)$pages
+  
+  if (actual_pages != nrow(manifest)) {
+    stop("Combined PDF page-count verification failed: ", temporary)
   }
   
-  if (file.exists(final_pdf)) {
-    stop(
-      "Combined PDF already exists: ", final_pdf,
-      ". Rename it before rebuilding. New build: ", temporary_pdf
-    )
+  if (file.exists(final)) {
+    stop("Combined PDF already exists; new build retained at: ", temporary)
   }
   
-  if (!file.rename(temporary_pdf, final_pdf)) {
-    stop("Could not publish PDF. Build: ", temporary_pdf)
+  if (!file.rename(temporary, final)) {
+    stop("Could not publish PDF; build retained at: ", temporary)
   }
   
-  manifest$page <- seq_len(expected_pages)
+  manifest$page <- seq_len(nrow(manifest))
   
   utils::write.csv(
     manifest,
@@ -1206,92 +1302,60 @@ build_combined_forecast_pdf <- function(root, delete_raw = FALSE) {
     row.names = FALSE
   )
   
-  cat("\nVerified PDF:", final_pdf, "\nPages:", actual_pages, "\n")
-  
-  if (isTRUE(delete_raw)) {
-    candidates <- unique(c(files, all_inputs))
-    candidates <- candidates[file.exists(candidates)]
-    
-    cleanup <- data.frame(
-      file    = substring(candidates, nchar(root) + 2L),
-      bytes   = file.info(candidates)$size,
-      deleted = FALSE,
-      stringsAsFactors = FALSE
-    )
-    
-    for (i in seq_along(candidates)) {
-      cleanup$deleted[i] <- file.remove(candidates[i])
-    }
-    
-    utils::write.csv(
-      cleanup,
-      file.path(root, "forecast_cleanup_manifest.csv"),
-      row.names = FALSE
-    )
-    
-    if (any(!cleanup$deleted)) {
-      warning(
-        "Some files could not be deleted. See forecast_cleanup_manifest.csv.",
-        call. = FALSE
-      )
-    }
-    
-    cat(
-      "Deleted", sum(cleanup$deleted), "source files; reclaimed ~",
-      round(
-        sum(cleanup$bytes[cleanup$deleted], na.rm = TRUE) / 1024^3, 2
-      ),
-      "GiB.\n"
-    )
-  } else {
-    cat("Raw files retained.\n")
-  }
+  log_line("Combined PDF saved: ", final)
+  log_line("Forecast objects omitted: ", length(failures))
+  log_line("Raw forecasts and PDF fragments retained.")
   
   invisible(manifest)
 }
 
-forecast_pdf_manifest <- build_combined_forecast_pdf(
-  root       = scale_run_folder,
-  delete_raw = DELETE_RAW_AFTER_VALIDATION
-)
+if (GENERATE_FORECAST_PDF) {
+  tryCatch(
+    build_combined_forecast_pdf(scale_run_folder),
+    error = function(e) {
+      warning(
+        "PDF generation failed: ", conditionMessage(e),
+        ". Forecasts, metrics, and raw files remain available.",
+        call. = FALSE
+      )
+    }
+  )
+}
 
 # =============================================================================
 # FINAL SUMMARY
 # =============================================================================
 
-cat("\n", paste(rep("=", 80), collapse = ""), "\n", sep = "")
-cat("MODEL-BY-MODEL SPATIAL SCALE COMPARISON COMPLETE\n")
-cat(paste(rep("=", 80), collapse = ""), "\n\n")
-cat("Results saved to:", scale_run_folder, "\n\n")
-cat("Output files:\n")
-cat("  base_config.rds                 — base configuration\n")
-cat("  window_skill_all_scales.csv     — per-window skill scores\n")
-cat("  all_models_window_delta.png     — cross-model delta with ggside marginal\n")
-cat("  all_models_window_delta.csv     — cross-model delta table\n")
-cat("  all_models_delta_density.png    — density of delta distribution\n")
-cat("  all_models_delta_ecdf.png       — ECDF of delta distribution\n")
-cat("  all_models_delta_violin.png     — violin plot of delta distribution\n")
-cat("  all_models_summary.csv          — aggregated summary\n")
-cat("  window_delta_marginal/          — per-panel ggExtra marginal plots\n")
-cat("  all_models_forecasts.pdf        — combined forecast PDF\n\n")
+run_manifest <- dplyr::bind_rows(run_records)
 
-for (model_key in names(all_model_results)) {
-  cat(glue("  {model_key}/\n"))
-  cat(glue("    ├── window_skill_by_scale.png\n"))
-  cat(glue("    ├── window_delta_skill.png\n"))
-  cat(glue("    ├── window_delta_skill.csv\n"))
-  for (scale in SCALES_TO_RUN) cat(glue("    └── {scale}/\n"))
+disk_save_rds(
+  list(
+    run_manifest = run_manifest,
+    result_paths = all_model_results,
+    preflight = preflight,
+    completed_at = Sys.time(),
+    session = utils::sessionInfo()
+  ),
+  file.path(scale_run_folder, "wrapper_metadata.rds")
+)
+
+log_line("\nMODEL/SCALE RUN SUMMARY")
+print(run_manifest)
+
+log_line("\nResults saved to: ", scale_run_folder)
+log_line("Raw files and original pipeline directories were retained.")
+log_line("No automatic cleanup or archive deletion was performed.")
+
+if (!any(run_manifest$status == "completed")) {
+  stop(
+    "All model/scale runs failed. Inspect run_manifest.csv and FAILED_*.txt."
+  )
 }
 
-# =============================================================================
-# ZIP on HiPerGator
-# =============================================================================
-
-if (dir.exists("/blue/ewhite")) {
-  zip_path <- paste0(scale_run_folder, ".zip")
-  cat("\nZipping results folder...\n")
-  zip(zipfile = zip_path, files = scale_run_folder)
-  cat(glue("  ✓ Zipped: {zip_path}\n"))
-  unlink(scale_run_folder, recursive = TRUE)
-  cat(glue("  ✓ Removed original: {scale_run_folder}\n"))
+if (any(run_manifest$status == "failed")) {
+  warning(
+    "Some runs failed; available outputs were saved. ",
+    "Inspect run_manifest.csv before interpreting comparisons.",
+    call. = FALSE
+  )
 }

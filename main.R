@@ -649,4 +649,7 @@ run_forecasting_pipeline <- function() {
   invisible(list(run_folder = run_folder))
 }
 
-run_forecasting_pipeline()
+# Run automatically unless a wrapper requests definition-only loading.
+if (!isTRUE(getOption("wading_birds.main.define_only", FALSE))) {
+  run_forecasting_pipeline()
+}
