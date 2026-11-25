@@ -294,17 +294,54 @@ invalidate_prepared_cache <- function() {
 
 log_line("\nPreparing shared source data...")
 
-if (UPDATE_BIRDS || !dir.exists("SiteandMethods")) {
-  wader::download_observations(".")
-  invalidate_prepared_cache()
+# Test the actual loader instead of assuming a download directory name.
+check_bird_observations <- function(path = ".") {
+  tryCatch({
+    counts <- tibble::as_tibble(
+      wader::max_counts(level = "all", path = path)
+    )
+    
+    required <- c("year", "species", "count")
+    missing <- base::setdiff(required, names(counts))
+    
+    if (length(missing)) {
+      stop("Missing columns: ", paste(missing, collapse = ", "))
+    }
+    
+    if (!nrow(counts)) {
+      stop("The observation loader returned no rows.")
+    }
+    
+    list(ok = TRUE, error = NULL)
+  }, error = function(e) {
+    list(ok = FALSE, error = conditionMessage(e))
+  })
 }
 
-if (!dir.exists("SiteandMethods")) {
+bird_check <- check_bird_observations(".")
+
+if (UPDATE_BIRDS || !bird_check$ok) {
+  if (!bird_check$ok) {
+    log_line("Existing observations could not be read: ", bird_check$error)
+  }
+  
+  log_line("Downloading bird observations...")
+  wader::download_observations(".")
+  invalidate_prepared_cache()
+  
+  bird_check <- check_bird_observations(".")
+}
+
+if (!bird_check$ok) {
   stop(
-    "SiteandMethods was not found after bird-data preparation. ",
-    "Check the observation download location."
+    "Bird observations remain unreadable after preparation.",
+    "\nWorking directory: ", getwd(),
+    "\nLoader error: ", bird_check$error,
+    call. = FALSE
   )
 }
+
+log_line("Bird observations are readable.")
 
 water <- get_data_water(
   remote_url = base_config$water$remote_url,

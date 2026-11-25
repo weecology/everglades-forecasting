@@ -315,7 +315,18 @@ run_forecasting_pipeline <- function() {
   disk_create_dir("cache")
   
   updates      <- cfg$data_update %||% list()
-  update_birds <- isTRUE(updates$birds %||% FALSE) || !dir.exists("SiteandMethods")
+  
+  birds_readable <- tryCatch({
+    counts <- wader::max_counts(level = "all", path = ".")
+    
+    is.data.frame(counts) &&
+      nrow(counts) > 0L &&
+      all(c("year", "species", "count") %in% names(counts))
+  }, error = function(e) {
+    FALSE
+  })
+  
+  update_birds <- isTRUE(updates$birds %||% FALSE) || !birds_readable
   
   if (update_birds) {
     cat("Downloading bird observations...\n")
