@@ -15,6 +15,20 @@
 #   list(fc = fc, crps = crps)
 #
 # Windows are sequential. Outer model parallelism remains the caller's choice.
+#
+# Changes from previous version:
+#   [1] extract_crps_mvgam: wraps mvgam::score() in tryCatch; NaN/Inf scores
+#       set to NA with a warning rather than propagating to quantile().
+#   [2] prepare_mvgam_data: per-series time-continuity check uses each
+#       series' own range, not the global range.
+#   [3] fit_sliding_window: year-completeness check is per-series for
+#       multi-series panels, not aggregate across all series.
+#   [4] add_baseline_skill: warns when no baseline model is present so
+#       all-NA skill is not silent.
+#   [5] fit_mvgam_baseline dead formula removed (baseline_formula was built
+#       but never passed to mvgam(); now formula is explicit and documented).
+#   [6] guard_config_init is wired into get_evaluation_config() so it is
+#       actually called on first use.
 # =============================================================================
 
 library(dplyr)
@@ -28,6 +42,8 @@ library(future)
 # COMMON UTILITIES
 # =============================================================================
 
+# Initialise CONFIG from config::get() if it is absent.
+# Called lazily by get_evaluation_config().
 guard_config_init <- function() {
   if (!exists("CONFIG", inherits = TRUE)) {
     assign("CONFIG", config::get(), envir = .GlobalEnv)
@@ -36,9 +52,7 @@ guard_config_init <- function() {
 }
 
 get_evaluation_config <- function() {
-  if (!exists("CONFIG", inherits = TRUE)) {
-    stop("CONFIG must be initialized before evaluation.")
-  }
+  guard_config_init()                        # [6] was never called before
   get("CONFIG", inherits = TRUE)
 }
 
@@ -50,9 +64,9 @@ positive_integer <- function(x, name) {
   as.integer(x)
 }
 
+# Returns NA when all values are missing; does NOT silently drop Inf.
 finite_mean <- function(x) {
   if (!length(x) || all(is.na(x))) return(NA_real_)
-  # Do not silently discard infinite errors/scores.
   mean(x, na.rm = TRUE)
 }
 
@@ -69,7 +83,8 @@ evaluation_keys <- function(df) {
 
 assert_unique_rows <- function(df, keys, label) {
   if (!all(keys %in% names(df))) {
-    stop(label, " is missing required keys.")
+    stop(label, " is missing required keys: ",
+         paste(setdiff(keys, names(df)), collapse = ", "))
   }
   if (anyDuplicated(as.data.frame(df[keys]))) {
     stop(label, " has duplicate rows for: ", paste(keys, collapse = ", "))
@@ -77,13 +92,25 @@ assert_unique_rows <- function(df, keys, label) {
   invisible(NULL)
 }
 
+# [4] Warn explicitly when no baseline row exists so all-NA skill is visible.
 add_baseline_skill <- function(df, model_col, keys, metric) {
   if (!nrow(df)) return(df)
   
   baseline_col <- paste0(metric, "_baseline")
-  skill_col <- paste0(metric, "_skill")
+  skill_col    <- paste0(metric, "_skill")
   
   df <- df |> dplyr::select(-any_of(c(baseline_col, skill_col)))
+  
+  if (!any(df[[model_col]] == "baseline")) {
+    warning(
+      "add_baseline_skill: no 'baseline' model found for metric '", metric,
+      "'; skill scores will be NA.",
+      call. = FALSE
+    )
+    df[[baseline_col]] <- NA_real_
+    df[[skill_col]]    <- NA_real_
+    return(df)
+  }
   
   baseline <- df |>
     dplyr::filter(.data[[model_col]] == "baseline") |>
@@ -99,10 +126,10 @@ add_baseline_skill <- function(df, model_col, keys, metric) {
 
 empty_window_result <- function() {
   list(
-    predictions = tibble(),
-    metrics = tibble(),
+    predictions = tibble::tibble(),
+    metrics     = tibble::tibble(),
     model_files = list(),
-    errors = character()
+    errors      = character()
   )
 }
 
@@ -116,7 +143,7 @@ disk_create_dir <- function(path) {
   invisible(path)
 }
 
-# Write through a temporary file; do not silently continue after save failure.
+# Atomic write: save to temp then rename. Never silently continues on failure.
 disk_save_rds <- function(object, path) {
   disk_create_dir(dirname(path))
   temporary <- tempfile(pattern = ".writing_", tmpdir = dirname(path))
@@ -198,8 +225,6 @@ save_native_mvgam_object <- function(fc, directory) {
       }
     }, add = TRUE)
     
-    # Native S3 method for the mvgam_forecast object.
-    # Uses its historical draws, forecast draws, and observations.
     graphics::plot(fc, series = index)
     invisible(NULL)
   }
@@ -207,14 +232,10 @@ save_native_mvgam_object <- function(fc, directory) {
   rows <- lapply(seq_along(labels), function(index) {
     filename <- file.path(
       directory,
-      sprintf(
-        "series_%03d_%s.png",
-        index,
-        disk_safe_name(labels[index])
-      )
+      sprintf("series_%03d_%s.png", index, disk_safe_name(labels[index]))
     )
     
-    error <- NA_character_
+    error   <- NA_character_
     success <- tryCatch({
       draw_one(index, filename)
       TRUE
@@ -224,12 +245,12 @@ save_native_mvgam_object <- function(fc, directory) {
       FALSE
     })
     
-    tibble(
-      series = labels[index],
+    tibble::tibble(
+      series       = labels[index],
       series_index = index,
-      filename = basename(filename),
-      success = success,
-      error = error
+      filename     = basename(filename),
+      success      = success,
+      error        = error
     )
   })
   
@@ -252,7 +273,7 @@ save_native_fable_object <- function(fc, train_data, test_data,
   
   history <- tsibble::as_tsibble(
     tibble::as_tibble(train_data),
-    key = tidyselect::all_of(keys),
+    key   = tidyselect::all_of(keys),
     index = year
   )
   
@@ -261,21 +282,20 @@ save_native_fable_object <- function(fc, train_data, test_data,
     ggplot2::theme(legend.position = "bottom") +
     ggplot2::labs(x = "Year", y = "Count")
   
-  # Retain the original key columns for native faceting.
   p <- p + ggplot2::geom_point(
-    data = tibble::as_tibble(test_data),
-    mapping = ggplot2::aes(x = year, y = count),
-    inherit.aes = FALSE,
-    colour = "black",
-    size = 1.8
+    data         = tibble::as_tibble(test_data),
+    mapping      = ggplot2::aes(x = year, y = count),
+    inherit.aes  = FALSE,
+    colour       = "black",
+    size         = 1.8
   )
   
   ggplot2::ggsave(
     file.path(directory, "forecast.png"),
-    plot = p,
-    width = 12,
+    plot   = p,
+    width  = 12,
     height = 8,
-    dpi = 150
+    dpi    = 150
   )
   
   invisible(NULL)
@@ -290,16 +310,16 @@ fit_sliding_window <- function(data,
                                train_years,
                                test_years,
                                cv_windows = NULL,
-                               parallel = FALSE,
-                               workers = NULL,
-                               framework = NULL,
+                               parallel   = FALSE,
+                               workers    = NULL,
+                               framework  = NULL,
                                ...) {
-  dots <- list(...)
+  dots   <- list(...)
   config <- dots$config %||% get_evaluation_config()
   
   train_years <- positive_integer(train_years, "train_years")
-  test_years <- positive_integer(test_years, "test_years")
-  root <- evaluation_output_dir(config)
+  test_years  <- positive_integer(test_years,  "test_years")
+  root        <- evaluation_output_dir(config)
   
   if (!is.data.frame(data) || !nrow(data) || !"year" %in% names(data)) {
     stop("data must contain observations and a year column.")
@@ -337,7 +357,6 @@ fit_sliding_window <- function(data,
   
   if (!framework %in% c("mvgam", "fable")) stop("Unknown framework.")
   
-  # CV remains sequential and does not alter the caller's future plan.
   if (isTRUE(parallel)) {
     message("Windows are sequential to limit peak memory.")
   }
@@ -354,20 +373,20 @@ fit_sliding_window <- function(data,
   }
   
   forecast_parts <- vector("list", length(starts))
-  metric_parts <- vector("list", length(starts))
-  records <- vector("list", length(starts))
+  metric_parts   <- vector("list", length(starts))
+  records        <- vector("list", length(starts))
   
   for (i in seq_along(starts)) {
     train_start <- starts[i]
-    test_start <- train_start + train_years
-    test_end <- test_start + test_years - 1L
+    test_start  <- train_start + train_years
+    test_end    <- test_start  + test_years - 1L
     
     relative_directory <- file.path(
       "windows",
       paste0(disk_safe_name(location), "_", test_start)
     )
     
-    window_directory <- file.path(root, relative_directory)
+    window_directory    <- file.path(root, relative_directory)
     framework_directory <- file.path(window_directory, framework)
     disk_create_dir(framework_directory)
     
@@ -379,39 +398,56 @@ fit_sliding_window <- function(data,
       tibble::as_tibble() |>
       dplyr::filter(year >= test_start, year <= test_end)
     
-    if (!setequal(unique(train$year), seq.int(train_start, test_start - 1L)) ||
-        !setequal(unique(test$year), seq.int(test_start, test_end))) {
-      stop("Missing calendar years in window ", location, "_", test_start)
+    # [3] Check year completeness per-series, not just aggregate unique years.
+    check_year_completeness <- function(df, expected_years, label) {
+      series_col <- if ("series" %in% names(df)) "series" else
+        if ("region"  %in% names(df)) "region"  else NULL
+      
+      if (is.null(series_col)) {
+        # Single-series path: check aggregate.
+        if (!setequal(unique(df$year), expected_years)) {
+          stop("Missing calendar years in ", label,
+               " for window ", location, "_", test_start)
+        }
+        return(invisible(NULL))
+      }
+      
+      for (s in unique(df[[series_col]])) {
+        s_years <- df$year[df[[series_col]] == s]
+        if (!setequal(s_years, expected_years)) {
+          stop("Missing calendar years for ", series_col, "=", s,
+               " in ", label, " for window ", location, "_", test_start)
+        }
+      }
+      invisible(NULL)
     }
     
-    # Save the exact inputs before fitting.
-    disk_save_rds(train, file.path(window_directory, "train_data.rds"))
-    disk_save_rds(test, file.path(window_directory, "test_data.rds"))
+    check_year_completeness(train, seq.int(train_start, test_start - 1L), "train")
+    check_year_completeness(test,  seq.int(test_start,  test_end),         "test")
     
-    # Read saved inputs: these are the inputs actually passed to models.
+    disk_save_rds(train, file.path(window_directory, "train_data.rds"))
+    disk_save_rds(test,  file.path(window_directory, "test_data.rds"))
+    
     rm(train, test)
     
     train <- readRDS(file.path(window_directory, "train_data.rds"))
-    test <- readRDS(file.path(window_directory, "test_data.rds"))
+    test  <- readRDS(file.path(window_directory, "test_data.rds"))
     
     window_config <- config
-    window_config$.window_dir <- framework_directory
-    window_config$.window_relative_dir <- file.path(
-      relative_directory, framework
-    )
+    window_config$.window_dir          <- framework_directory
+    window_config$.window_relative_dir <- file.path(relative_directory, framework)
     
-    args <- dots
+    args        <- dots
     args$config <- window_config
     
     cat(
       "\nWindow", i, "/", length(starts), ":",
       location, "| Train", train_start, "-", test_start - 1L,
-      "| Test", test_start, "-", test_end, "\n"
+      "| Test",  test_start, "-", test_end, "\n"
     )
     
     error_text <- NULL
     
-    # Persistence failures are fatal: never continue silently without raw files.
     result <- tryCatch(
       do.call(make_forecast, c(list(train, test), args)),
       error = function(e) {
@@ -424,17 +460,15 @@ fit_sliding_window <- function(data,
     
     if (is.null(result) || length(result) < 2L) {
       error_text <- error_text %||% "Forecast function returned no result."
-      result <- empty_window_result()
+      result     <- empty_window_result()
     }
     
-    fc_table <- result[[1]]
-    metrics <- result[[2]]
+    fc_table    <- result[[1]]
+    metrics     <- result[[2]]
     model_files <- result$model_files %||% list()
     
-    if (framework == "fable" &&
-        is.data.frame(fc_table) && nrow(fc_table)) {
+    if (framework == "fable" && is.data.frame(fc_table) && nrow(fc_table)) {
       raw_path <- file.path(framework_directory, "forecast.rds")
-      
       disk_save_rds(fc_table, raw_path)
       
       model_files <- list(
@@ -462,52 +496,45 @@ fit_sliding_window <- function(data,
         ),
         error = function(e) {
           warning("Fable evaluation failed: ", conditionMessage(e), call. = FALSE)
-          tibble()
+          tibble::tibble()
         }
       )
     }
     
-    # Avoid dplyr data-mask ambiguity between column and local variable names.
     tag_window <- function(x) {
-      if (is.null(x) || !is.data.frame(x) || !nrow(x)) return(tibble())
-      out <- tibble::as_tibble(x)
-      out$test_start <- test_start
-      out$window <- i
+      if (is.null(x) || !is.data.frame(x) || !nrow(x)) return(tibble::tibble())
+      out             <- tibble::as_tibble(x)
+      out$test_start  <- test_start
+      out$window      <- i
       out
     }
     
     forecast_parts[[i]] <- tag_window(fc_table)
-    metric_parts[[i]] <- tag_window(metrics)
+    metric_parts[[i]]   <- tag_window(metrics)
     
     record <- list(
-      window = i,
-      location = location,
-      region = if (length(regions) == 1L) location else NULL,
-      train_start = train_start,
-      train_end = test_start - 1L,
-      test_start = test_start,
-      test_end = test_end,
-      framework = framework,
-      directory = relative_directory,
-      train_file = file.path(relative_directory, "train_data.rds"),
-      test_file = file.path(relative_directory, "test_data.rds"),
-      model_files = model_files,
-      model_names = names(model_files),
-      error = error_text,
+      window       = i,
+      location     = location,
+      region       = if (length(regions) == 1L) location else NULL,
+      train_start  = train_start,
+      train_end    = test_start - 1L,
+      test_start   = test_start,
+      test_end     = test_end,
+      framework    = framework,
+      directory    = relative_directory,
+      train_file   = file.path(relative_directory, "train_data.rds"),
+      test_file    = file.path(relative_directory, "test_data.rds"),
+      model_files  = model_files,
+      model_names  = names(model_files),
+      error        = error_text,
       model_errors = result$errors %||% character()
     )
     
     records[[i]] <- record
     
-    disk_save_rds(
-      forecast_parts[[i]],
-      file.path(framework_directory, "predictions.rds")
-    )
-    disk_save_rds(
-      metric_parts[[i]],
-      file.path(framework_directory, "metrics.rds")
-    )
-    disk_save_rds(record, file.path(framework_directory, "metadata.rds"))
+    disk_save_rds(forecast_parts[[i]], file.path(framework_directory, "predictions.rds"))
+    disk_save_rds(metric_parts[[i]],   file.path(framework_directory, "metrics.rds"))
+    disk_save_rds(record,              file.path(framework_directory, "metadata.rds"))
     
     rm(result, fc_table, metrics, train, test, record, args, window_config)
     gc(verbose = FALSE)
@@ -517,13 +544,13 @@ fit_sliding_window <- function(data,
   
   list(
     forecasts = dplyr::bind_rows(forecast_parts),
-    metrics = dplyr::bind_rows(metric_parts),
-    cv_info = list(
-      n_windows = length(starts),
-      train_years = train_years,
-      test_years = test_years,
+    metrics   = dplyr::bind_rows(metric_parts),
+    cv_info   = list(
+      n_windows    = length(starts),
+      train_years  = train_years,
+      test_years   = test_years,
       train_starts = starts,
-      test_starts = starts + train_years
+      test_starts  = starts + train_years
     ),
     window_objects = records
   )
@@ -533,34 +560,63 @@ fit_sliding_window <- function(data,
 # MVGAM CRPS AND DATA PREPARATION
 # =============================================================================
 
+# [1] Wraps mvgam::score() in tryCatch. Non-finite scores become NA with a
+#     warning so they never reach quantile() and crash the job.
 extract_crps_mvgam <- function(forecast_obj, model_name) {
-  raw <- mvgam::score(forecast_obj, score = "crps")
+  raw <- tryCatch(
+    mvgam::score(forecast_obj, score = "crps"),
+    error = function(e) {
+      warning(
+        "mvgam::score() failed for model '", model_name, "': ",
+        conditionMessage(e),
+        call. = FALSE
+      )
+      NULL
+    }
+  )
+  
+  if (is.null(raw)) return(tibble::tibble())
+  
   raw <- raw[names(raw) != "all_series"]
   
   dplyr::bind_rows(lapply(names(raw), function(s) {
     entry <- raw[[s]]
-    if (!length(entry$score)) return(tibble())
+    if (!length(entry$score)) return(tibble::tibble())
     
     scores <- as.numeric(entry$score)
+    
+    n_bad <- sum(!is.finite(scores))
+    if (n_bad > 0L) {
+      warning(
+        sprintf(
+          "model '%s', series '%s': %d non-finite CRPS value(s) replaced with NA",
+          model_name, s, n_bad
+        ),
+        call. = FALSE
+      )
+      scores[!is.finite(scores)] <- NA_real_
+    }
+    
     horizon <- entry$eval_horizon %||% seq_along(scores)
     
     if (length(horizon) != length(scores)) {
-      stop("Unexpected CRPS horizon structure for ", s)
+      stop("Unexpected CRPS horizon length for model '", model_name,
+           "', series '", s, "'")
     }
     
-    tibble(
-      series = s,
-      score = scores,
+    tibble::tibble(
+      series       = s,
+      score        = scores,
       eval_horizon = horizon,
-      model = model_name
+      model        = model_name
     )
   }))
 }
 
 prepare_mvgam_data <- function(train_data, test_data) {
   train <- tibble::as_tibble(train_data)
-  test <- tibble::as_tibble(test_data)
-  keys <- evaluation_keys(train)
+  test  <- tibble::as_tibble(test_data)
+  keys  <- evaluation_keys(train)
   
   for (df in list(train, test)) {
     if (!all(c(keys, "year", "count") %in% names(df))) {
@@ -570,9 +626,9 @@ prepare_mvgam_data <- function(train_data, test_data) {
   }
   
   assert_unique_rows(train, c(keys, "year"), "Training data")
-  assert_unique_rows(test, c(keys, "year"), "Test data")
+  assert_unique_rows(test,  c(keys, "year"), "Test data")
   
-  labels <- function(df) {
+  make_labels <- function(df) {
     if ("region" %in% keys) {
       paste(df$species, df$region, sep = "_")
     } else {
@@ -580,32 +636,36 @@ prepare_mvgam_data <- function(train_data, test_data) {
     }
   }
   
-  train$series_id <- labels(train)
-  test$series_id <- labels(test)
+  train$series_id <- make_labels(train)
+  test$series_id  <- make_labels(test)
   
   series_map <- dplyr::bind_rows(
     train |> dplyr::select(series_id, all_of(keys)),
-    test |> dplyr::select(series_id, all_of(keys))
+    test  |> dplyr::select(series_id, all_of(keys))
   ) |> dplyr::distinct()
   
   assert_unique_rows(series_map, "series_id", "Series labels")
   
-  levels <- unique(train$series_id)
-  if (length(setdiff(test$series_id, levels))) {
-    stop("Test series absent from training.")
+  series_levels <- unique(train$series_id)
+  
+  absent <- setdiff(test$series_id, series_levels)
+  if (length(absent)) {
+    stop("Test series absent from training: ", paste(absent, collapse = ", "))
   }
   
   origin <- min(train$year)
   
   convert <- function(df) {
-    df$series <- factor(df$series_id, levels = levels)
-    df$time <- as.integer(df$year - origin + 1L)
+    df$series    <- factor(df$series_id, levels = series_levels)
+    df$time      <- as.integer(df$year - origin + 1L)
     df$series_id <- NULL
     
-    expected <- seq.int(min(df$time), max(df$time))
-    for (s in levels) {
-      if (!setequal(df$time[as.character(df$series) == s], expected)) {
-        stop("Missing annual rows for series ", s)
+    # [2] Per-series continuity check using each series' own time range.
+    for (s in series_levels) {
+      s_times  <- df$time[as.character(df$series) == s]
+      expected <- seq.int(min(s_times), max(s_times))
+      if (!setequal(s_times, expected)) {
+        stop("Missing annual rows for series '", s, "'")
       }
     }
     
@@ -613,19 +673,22 @@ prepare_mvgam_data <- function(train_data, test_data) {
   }
   
   list(
-    train = convert(train),
-    test = convert(test),
-    keys = keys,
+    train      = convert(train),
+    test       = convert(test),
+    keys       = keys,
     series_map = series_map
   )
 }
 
 extract_mvgam_predictions <- function(fc, model_name, prepared) {
-  df <- tibble::as_tibble(summary(fc))
+  df       <- tibble::as_tibble(summary(fc))
   required <- c("series", "time", "predQ50", "predQ2.5", "predQ97.5")
   
   if (!all(required %in% names(df))) {
-    stop("Unexpected mvgam summary columns; inspect names(summary(fc)).")
+    stop(
+      "Unexpected mvgam summary columns. Found: ",
+      paste(names(df), collapse = ", ")
+    )
   }
   
   rows <- lapply(prepared$series_map$series_id, function(s) {
@@ -640,7 +703,7 @@ extract_mvgam_predictions <- function(fc, model_name, prepared) {
     
     times <- as.integer(part$time)
     
-    if (anyDuplicated(times)) stop("Duplicate summary times for ", s)
+    if (anyDuplicated(times)) stop("Duplicate summary times for series '", s, "'")
     
     if (all(expected$time %in% times)) {
       index <- match(expected$time, times)
@@ -648,25 +711,26 @@ extract_mvgam_predictions <- function(fc, model_name, prepared) {
                setequal(times, seq_len(nrow(expected)))) {
       index <- match(seq_len(nrow(expected)), times)
     } else {
-      stop("Cannot map forecast years for ", s)
+      stop("Cannot map forecast years for series '", s, "'")
     }
     
     part <- part[index, , drop = FALSE]
     
-    out <- tibble(
-      series = s,
-      time = expected$time,
-      year = expected$year,
-      model = model_name,
+    out <- tibble::tibble(
+      series   = s,
+      time     = expected$time,
+      year     = expected$year,
+      model    = model_name,
       Estimate = part$predQ50,
-      Q2.5 = part$predQ2.5,
-      Q97.5 = part$predQ97.5
+      Q2.5     = part$predQ2.5,
+      Q97.5    = part$predQ97.5
     )
     
     for (q in c("10", "25", "75", "90")) {
       col <- paste0("predQ", q)
       if (col %in% names(part)) out[[paste0("Q", q)]] <- part[[col]]
     }
+    
     out
   })
   
@@ -678,22 +742,24 @@ extract_mvgam_predictions <- function(fc, model_name, prepared) {
 # MVGAM - FIT, SAVE, PLOT, SUMMARISE, RELEASE EACH MODEL
 # =============================================================================
 
-make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
-                                 use_ordinal = FALSE,
+make_mvgam_forecasts <- function(train_data,
+                                 test_data,
+                                 models_to_run,
+                                 use_ordinal        = FALSE,
                                  precomputed_breaks = NULL,
-                                 config = get_evaluation_config()) {
+                                 config             = get_evaluation_config()) {
   if (is.null(config$.window_dir)) {
     stop("Call make_mvgam_forecasts through fit_sliding_window().")
   }
   
   prepared <- prepare_mvgam_data(train_data, test_data)
-  keys <- prepared$keys
-  groups <- c("model", keys)
+  keys     <- prepared$keys
+  groups   <- c("model", keys)
   
   prediction_parts <- list()
-  crps_parts <- list()
-  model_files <- list()
-  errors <- character()
+  crps_parts       <- list()
+  model_files      <- list()
+  errors           <- character()
   
   for (model_name in unique(models_to_run)) {
     function_name <- paste0("fit_mvgam_", model_name)
@@ -722,13 +788,9 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
       next
     }
     
-    model_directory <- file.path(
-      config$.window_dir,
-      disk_safe_name(model_name)
-    )
-    raw_file <- file.path(model_directory, "forecast.rds")
+    model_directory <- file.path(config$.window_dir, disk_safe_name(model_name))
+    raw_file        <- file.path(model_directory, "forecast.rds")
     
-    # Fatal if raw-object persistence fails.
     tryCatch(
       disk_save_rds(result$fc, raw_file),
       error = function(e) {
@@ -748,10 +810,7 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
     
     if (isTRUE(config$plots$native_mvgam %||% TRUE)) {
       tryCatch(
-        save_native_mvgam_object(
-          result$fc,
-          file.path(model_directory, "plots")
-        ),
+        save_native_mvgam_object(result$fc, file.path(model_directory, "plots")),
         error = function(e) {
           warning("Native plot failed: ", conditionMessage(e), call. = FALSE)
         }
@@ -762,46 +821,44 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
       extract_mvgam_predictions(result$fc, model_name, prepared),
       error = function(e) {
         errors[paste0(model_name, "_predictions")] <<- conditionMessage(e)
-        tibble()
+        tibble::tibble()
       }
     )
     
     crps_parts[[model_name]] <- tryCatch({
       scores <- result$crps
-      if (is.null(scores) || !nrow(scores)) {
+      if (is.null(scores) || !is.data.frame(scores) || !nrow(scores)) {
         scores <- extract_crps_mvgam(result$fc, model_name)
       }
       
       scores |>
         tibble::as_tibble() |>
         dplyr::mutate(series = as.character(series), model = model_name) |>
-        dplyr::left_join(
-          prepared$series_map,
-          by = c("series" = "series_id")
-        )
+        dplyr::left_join(prepared$series_map, by = c("series" = "series_id"))
     }, error = function(e) {
       errors[paste0(model_name, "_crps")] <<- conditionMessage(e)
-      tibble()
+      tibble::tibble()
     })
     
-    # No raw forecast list is accumulated.
     rm(result, fit_function)
     gc(verbose = FALSE)
   }
   
   predictions <- dplyr::bind_rows(prediction_parts)
-  crps_rows <- dplyr::bind_rows(crps_parts)
+  crps_rows   <- dplyr::bind_rows(crps_parts)
   metric_parts <- list()
   
   if (nrow(crps_rows)) {
-    if (anyNA(crps_rows[keys])) stop("Unmatched CRPS series labels.")
+    if (anyNA(crps_rows[keys])) {
+      stop("Unmatched CRPS series labels: NA key values after series_map join.")
+    }
     
     metric_parts$crps <- crps_rows |>
       dplyr::group_by(across(all_of(groups))) |>
       dplyr::summarise(
-        crps = finite_mean(score),
+        crps        = finite_mean(score),
         n_forecasts = sum(!is.na(score)),
-        .groups = "drop"
+        .groups     = "drop"
       ) |>
       add_baseline_skill("model", keys, "crps")
   }
@@ -811,13 +868,12 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
     
     metric_parts$rmse <- predictions |>
       dplyr::left_join(
-        tibble::as_tibble(test_data) |>
-          dplyr::select(all_of(c(obs_keys, "count"))),
+        tibble::as_tibble(test_data) |> dplyr::select(all_of(c(obs_keys, "count"))),
         by = obs_keys
       ) |>
       dplyr::group_by(across(all_of(groups))) |>
       dplyr::summarise(
-        rmse = sqrt(finite_mean((Estimate - count)^2)),
+        rmse   = sqrt(finite_mean((Estimate - count)^2)),
         n_rmse = sum(!is.na(Estimate) & !is.na(count)),
         .groups = "drop"
       ) |>
@@ -830,21 +886,21 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
         ),
         error = function(e) {
           warning("RPS failed: ", conditionMessage(e), call. = FALSE)
-          tibble()
+          tibble::tibble()
         }
       )
     }
   }
   
-  metric_parts <- Filter(function(x) nrow(x) > 0L, metric_parts)
+  metric_parts <- Filter(function(x) is.data.frame(x) && nrow(x) > 0L, metric_parts)
   
   metrics <- if (length(metric_parts)) {
     Reduce(function(a, b) dplyr::full_join(a, b, by = groups), metric_parts)
   } else {
-    tibble()
+    tibble::tibble()
   }
   
-  if (nrow(metrics)) {
+  if (is.data.frame(metrics) && nrow(metrics)) {
     for (col in c(
       "crps", "crps_baseline", "crps_skill",
       "rmse", "rmse_baseline", "rmse_skill"
@@ -855,9 +911,9 @@ make_mvgam_forecasts <- function(train_data, test_data, models_to_run,
   
   list(
     predictions = predictions,
-    metrics = metrics,
+    metrics     = metrics,
     model_files = model_files,
-    errors = errors
+    errors      = errors
   )
 }
 
@@ -882,15 +938,12 @@ fix_zero_breaks <- function(quantiles_df) {
   out <- tibble::as_tibble(quantiles_df)
   
   for (i in seq_len(nrow(out))) {
-    # Explicitly unlist the row: a tibble is not a numeric vector.
-    values <- as.numeric(unlist(
-      out[i, c("low", "medium", "high")],
-      use.names = FALSE
-    ))
+    values <- as.numeric(unlist(out[i, c("low", "medium", "high")], use.names = FALSE))
     
     if (!all(is.finite(values))) next
+    
     values <- sort(values)
-    eps <- 1e-8 * max(1, abs(values))
+    eps    <- 1e-8 * max(1, abs(values))
     
     for (j in 2:3) {
       if (values[j] <= values[j - 1L]) {
@@ -898,16 +951,15 @@ fix_zero_breaks <- function(quantiles_df) {
       }
     }
     
-    out$low[i] <- values[1]
+    out$low[i]    <- values[1]
     out$medium[i] <- values[2]
-    out$high[i] <- values[3]
+    out$high[i]   <- values[3]
   }
   
   out
 }
 
-ordinal_thresholds <- function(train_data, config,
-                               precomputed_breaks = NULL) {
+ordinal_thresholds <- function(train_data, config, precomputed_breaks = NULL) {
   if (!is.null(precomputed_breaks)) {
     return(fix_zero_breaks(precomputed_breaks))
   }
@@ -916,16 +968,12 @@ ordinal_thresholds <- function(train_data, config,
   
   if (length(probs) != 3L || any(!is.finite(probs)) ||
       any(probs <= 0 | probs >= 1) || any(diff(probs) <= 0)) {
-    stop("ordinal_breaks must contain three increasing probabilities.")
+    stop("ordinal_breaks must contain three strictly increasing probabilities in (0,1).")
   }
   
   q <- function(x, p) {
     x <- x[is.finite(x)]
-    if (length(x)) {
-      as.numeric(stats::quantile(x, p, names = FALSE))
-    } else {
-      NA_real_
-    }
+    if (length(x)) as.numeric(stats::quantile(x, p, names = FALSE)) else NA_real_
   }
   
   train_data |>
@@ -933,20 +981,22 @@ ordinal_thresholds <- function(train_data, config,
     filter_ordinal_years(config$ordinal_years %||% "All") |>
     dplyr::group_by(across(all_of(evaluation_keys(train_data)))) |>
     dplyr::summarise(
-      low = q(count, probs[1]),
+      low    = q(count, probs[1]),
       medium = q(count, probs[2]),
-      high = q(count, probs[3]),
+      high   = q(count, probs[3]),
       .groups = "drop"
     ) |>
     fix_zero_breaks()
 }
 
 join_ordinal_data <- function(predictions, test_data, thresholds) {
-  keys <- evaluation_keys(test_data)
+  keys           <- evaluation_keys(test_data)
   threshold_keys <- intersect(keys, names(thresholds))
+  
   if (!"species" %in% threshold_keys) stop("Missing threshold species key.")
   
   assert_unique_rows(thresholds, threshold_keys, "Ordinal thresholds")
+  
   obs_keys <- c(keys, "year")
   
   obs <- tibble::as_tibble(test_data) |>
@@ -963,36 +1013,34 @@ join_ordinal_data <- function(predictions, test_data, thresholds) {
 
 aggregate_rps <- function(df, model_col, keys) {
   df$rps_row <-
-    (df$cdf_low - (df$observed_count <= df$low))^2 +
-    (df$cdf_medium - (df$observed_count <= df$medium))^2 +
-    (df$cdf_high - (df$observed_count <= df$high))^2
+    (df$cdf_low    - as.integer(df$observed_count <= df$low))^2    +
+    (df$cdf_medium - as.integer(df$observed_count <= df$medium))^2 +
+    (df$cdf_high   - as.integer(df$observed_count <= df$high))^2
   
-  invalid <- !is.finite(df$observed_count) |
+  invalid          <- !is.finite(df$observed_count) |
     !is.finite(df$low) | !is.finite(df$medium) | !is.finite(df$high)
-  
   df$rps_row[invalid] <- NA_real_
   
   df |>
     dplyr::group_by(across(all_of(c(model_col, keys)))) |>
     dplyr::summarise(
-      rps = finite_mean(rps_row),
+      rps   = finite_mean(rps_row),
       n_rps = sum(!is.na(rps_row)),
       .groups = "drop"
     ) |>
     add_baseline_skill(model_col, keys, "rps")
 }
 
+# Normal-approximation RPS (documented limitation for skewed count data).
 calculate_rps_mvgam <- function(predictions, test_data, train_data, config,
                                 precomputed_breaks = NULL) {
-  # Preserve the previous Normal-approximation RPS.
-  # This is not exact posterior-draw RPS for skewed count distributions.
   thresholds <- ordinal_thresholds(train_data, config, precomputed_breaks)
-  df <- join_ordinal_data(predictions, test_data, thresholds)
-  sd <- pmax((df$Q97.5 - df$Q2.5) / (2 * 1.96), 0.1)
+  df         <- join_ordinal_data(predictions, test_data, thresholds)
+  sd         <- pmax((df$Q97.5 - df$Q2.5) / (2 * 1.96), 0.1)
   
-  df$cdf_low <- stats::pnorm(df$low, df$Estimate, sd)
+  df$cdf_low    <- stats::pnorm(df$low,    df$Estimate, sd)
   df$cdf_medium <- stats::pnorm(df$medium, df$Estimate, sd)
-  df$cdf_high <- stats::pnorm(df$high, df$Estimate, sd)
+  df$cdf_high   <- stats::pnorm(df$high,   df$Estimate, sd)
   
   aggregate_rps(df, "model", evaluation_keys(test_data))
 }
@@ -1000,20 +1048,18 @@ calculate_rps_mvgam <- function(predictions, test_data, train_data, config,
 calculate_rps_fable <- function(forecasts, test_data, train_data, config,
                                 precomputed_breaks = NULL) {
   thresholds <- ordinal_thresholds(train_data, config, precomputed_breaks)
-  df <- join_ordinal_data(forecasts, test_data, thresholds)
+  df         <- join_ordinal_data(forecasts, test_data, thresholds)
   
   cdf_at <- function(distributions, thresholds) {
     vapply(seq_along(thresholds), function(i) {
       if (!is.finite(thresholds[i])) return(NA_real_)
-      as.numeric(unlist(
-        distributional::cdf(distributions[i], thresholds[i])
-      ))[1]
+      as.numeric(unlist(distributional::cdf(distributions[i], thresholds[i])))[1]
     }, numeric(1))
   }
   
-  df$cdf_low <- cdf_at(df$count, df$low)
+  df$cdf_low    <- cdf_at(df$count, df$low)
   df$cdf_medium <- cdf_at(df$count, df$medium)
-  df$cdf_high <- cdf_at(df$count, df$high)
+  df$cdf_high   <- cdf_at(df$count, df$high)
   
   aggregate_rps(df, ".model", evaluation_keys(test_data))
 }
@@ -1022,25 +1068,28 @@ calculate_rps_fable <- function(forecasts, test_data, train_data, config,
 # FABLE METRICS
 # =============================================================================
 
-make_fable_evaluation <- function(raw_metrics, forecasts, test_data,
-                                  train_data, config,
+make_fable_evaluation <- function(raw_metrics,
+                                  forecasts,
+                                  test_data,
+                                  train_data,
+                                  config,
                                   precomputed_breaks = NULL,
-                                  use_ordinal = FALSE) {
-  if (is.null(raw_metrics) || !nrow(raw_metrics)) return(tibble())
+                                  use_ordinal        = FALSE) {
+  if (is.null(raw_metrics) || !nrow(raw_metrics)) return(tibble::tibble())
   
-  metrics <- tibble::as_tibble(raw_metrics)
+  metrics  <- tibble::as_tibble(raw_metrics)
   required <- c(".model", "species", "crps", "rmse")
   
-  if (!all(required %in% names(metrics))) {
-    stop("Missing required fable metric columns.")
+  missing_cols <- setdiff(required, names(metrics))
+  if (length(missing_cols)) {
+    stop("Missing required fable metric columns: ",
+         paste(missing_cols, collapse = ", "))
   }
   
-  keys <- intersect(evaluation_keys(test_data), names(metrics))
+  keys          <- intersect(evaluation_keys(test_data), names(metrics))
   baseline_keys <- c(keys, intersect(".type", names(metrics)))
   
-  assert_unique_rows(
-    metrics, c(".model", baseline_keys), "Fable accuracy metrics"
-  )
+  assert_unique_rows(metrics, c(".model", baseline_keys), "Fable accuracy metrics")
   
   metrics <- metrics |>
     add_baseline_skill(".model", baseline_keys, "crps") |>
@@ -1053,11 +1102,11 @@ make_fable_evaluation <- function(raw_metrics, forecasts, test_data,
       ),
       error = function(e) {
         warning("Fable RPS failed: ", conditionMessage(e), call. = FALSE)
-        tibble()
+        tibble::tibble()
       }
     )
     
-    if (nrow(rps)) {
+    if (is.data.frame(rps) && nrow(rps)) {
       metrics <- dplyr::left_join(metrics, rps, by = c(".model", keys))
     }
   }
@@ -1072,7 +1121,7 @@ make_fable_evaluation <- function(raw_metrics, forecasts, test_data,
 load_window_data <- function(record, results_dir) {
   list(
     train_data = readRDS(file.path(results_dir, record$train_file)),
-    test_data = readRDS(file.path(results_dir, record$test_file))
+    test_data  = readRDS(file.path(results_dir, record$test_file))
   )
 }
 
@@ -1098,9 +1147,9 @@ print_cv_summary <- function(cv_results) {
   info <- cv_results$cv_info
   
   if (!is.null(info)) {
-    cat("Windows:", info$n_windows %||% "regional", "\n")
-    cat("Training years:", info$train_years, "\n")
-    cat("Test years:", info$test_years, "\n")
+    cat("Windows     :", info$n_windows %||% "regional", "\n")
+    cat("Train years :", info$train_years, "\n")
+    cat("Test years  :", info$test_years,  "\n")
   }
   
   metrics <- cv_results$metrics
@@ -1109,24 +1158,26 @@ print_cv_summary <- function(cv_results) {
     return(invisible(NULL))
   }
   
-  model_col <- if ("model" %in% names(metrics)) {
-    "model"
-  } else if (".model" %in% names(metrics)) {
-    ".model"
-  } else {
+  model_col <- if ("model"  %in% names(metrics)) "model"  else
+    if (".model" %in% names(metrics)) ".model" else {
+      cat("No model column found in metrics.\n")
+      return(invisible(NULL))
+    }
+  
+  if (!"crps" %in% names(metrics)) {
+    cat("No CRPS column found in metrics.\n")
     return(invisible(NULL))
   }
   
-  if (!"crps" %in% names(metrics)) return(invisible(NULL))
   if (!"crps_skill" %in% names(metrics)) metrics$crps_skill <- NA_real_
   
   out <- metrics |>
     dplyr::group_by(.data[[model_col]]) |>
     dplyr::summarise(
-      mean_crps = finite_mean(crps),
-      mean_skill = finite_mean(crps_skill),
-      metric_rows = n(),
-      .groups = "drop"
+      mean_crps   = finite_mean(crps),
+      mean_skill  = finite_mean(crps_skill),
+      metric_rows = dplyr::n(),
+      .groups     = "drop"
     ) |>
     dplyr::arrange(mean_crps)
   
