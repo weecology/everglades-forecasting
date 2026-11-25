@@ -1,4 +1,6 @@
+# =============================================================================
 # data_functions.R
+# =============================================================================
 library(digest)
 library(edenR)
 library(dplyr)
@@ -8,22 +10,21 @@ library(tsibble)
 library(wader)
 library(zoo)
 
-# Helper function
 `%||%` <- function(x, y) if (is.null(x)) y else x
-# Helper to translate config level to wader level
+
 translate_level_for_wader <- function(level) {
   if (level == "system") return("all")
   return(level)
 }
 
-
 # =============================================================================
 # WATER DATA
 # =============================================================================
+
 get_data_water <- function(
-    eden_path = "WaterData",
-    remote_url,
-    update = FALSE
+    eden_path  = "WaterData",
+    remote_url = NULL,        # NULL = skip remote check, use cache
+    update     = FALSE
 ) {
   if (!requireNamespace("httr2", quietly = TRUE)) {
     stop("Install httr2 first: install.packages('httr2')")
@@ -31,78 +32,71 @@ get_data_water <- function(
   
   dir.create(eden_path, recursive = TRUE, showWarnings = FALSE)
   
-  water_file <- file.path(eden_path, "eden_covariates.csv")
+  water_file    <- file.path(eden_path, "eden_covariates.csv")
   metadata_file <- file.path(eden_path, "eden_remote_metadata.rds")
   
-  # Retrieve metadata without downloading the remote file's body.
-  remote <- tryCatch({
-    response <- httr2::request(remote_url) |>
-      httr2::req_method("HEAD") |>
-      httr2::req_timeout(30) |>
-      httr2::req_perform()
-    
-    last_modified <- httr2::resp_header(response, "last-modified")
-    
-    if (is.null(last_modified) || !nzchar(last_modified)) {
-      stop("Remote server did not provide a Last-Modified header.")
-    }
-    
-    list(
-      url = remote_url,
-      last_modified = last_modified
-    )
-  }, error = function(e) {
-    if (!file.exists(water_file)) {
-      stop(
-        "Remote check failed and no local cache exists: ",
-        conditionMessage(e)
+  # ------------------------------------------------------------------
+  # Remote metadata check (skipped when remote_url is NULL)
+  # ------------------------------------------------------------------
+  remote <- if (!is.null(remote_url)) {
+    tryCatch({
+      response <- httr2::request(remote_url) |>
+        httr2::req_method("HEAD") |>
+        httr2::req_timeout(30) |>
+        httr2::req_perform()
+      
+      last_modified <- httr2::resp_header(response, "last-modified")
+      
+      if (is.null(last_modified) || !nzchar(last_modified)) {
+        stop("Remote server did not provide a Last-Modified header.")
+      }
+      
+      list(url = remote_url, last_modified = last_modified)
+    }, error = function(e) {
+      if (!file.exists(water_file)) {
+        stop(
+          "Remote check failed and no local cache exists: ",
+          conditionMessage(e)
+        )
+      }
+      warning(
+        "Remote check failed: ", conditionMessage(e),
+        ". Using existing cache.",
+        call. = FALSE
       )
-    }
-    
-    warning(
-      "Remote check failed: ", conditionMessage(e),
-      ". Using the existing cache unless update = TRUE.",
-      call. = FALSE
-    )
-    
-    NULL
-  })
-  
-  saved <- if (file.exists(metadata_file)) {
-    tryCatch(
-      readRDS(metadata_file),
-      error = function(e) NULL
-    )
+      NULL
+    })
   } else {
     NULL
   }
   
-  # Compare remote metadata with the version previously processed.
+  saved <- if (file.exists(metadata_file)) {
+    tryCatch(readRDS(metadata_file), error = function(e) NULL)
+  } else {
+    NULL
+  }
+  
   remote_changed <- !is.null(remote) && (
     is.null(saved) ||
-      !identical(remote$url, saved$url) ||
+      !identical(remote$url,           saved$url) ||
       !identical(remote$last_modified, saved$last_modified)
   )
   
-  needs_update <- isTRUE(update) ||
-    !file.exists(water_file) ||
-    remote_changed
+  needs_update <- isTRUE(update) || !file.exists(water_file) || remote_changed
   
   if (needs_update) {
     cat("Refreshing EDEN water data...\n")
     
     edenR::update_water(eden_path)
     
-    water_long <- get_eden_covariates(
-      eden_path = eden_path,
-      level = "subregions"
+    water_long <- edenR::get_eden_covariates(
+      eden_path = eden_path, level = "subregions"
     ) |>
       dplyr::bind_rows(
-        get_eden_covariates(eden_path = eden_path, level = "all"),
-        get_eden_covariates(eden_path = eden_path, level = "wcas")
+        edenR::get_eden_covariates(eden_path = eden_path, level = "all"),
+        edenR::get_eden_covariates(eden_path = eden_path, level = "wcas")
       )
     
-    # Remove spatial geometry before converting to the cached table.
     if (inherits(water_long, "sf")) {
       water_long <- sf::st_drop_geometry(water_long)
     }
@@ -110,327 +104,300 @@ get_data_water <- function(
     water <- water_long |>
       tibble::as_tibble() |>
       dplyr::select(year, region = Name, variable, value) |>
-      tidyr::pivot_wider(
-        names_from = variable,
-        values_from = value
-      ) |>
+      tidyr::pivot_wider(names_from = variable, values_from = value) |>
       dplyr::mutate(year = as.integer(year)) |>
       dplyr::arrange(year, region)
     
     readr::write_csv(water, water_file)
     
-    # Save remote metadata only after the refresh succeeds.
     if (!is.null(remote)) {
       saveRDS(remote, metadata_file)
     } else if (file.exists(metadata_file)) {
-      # A forced refresh without verified metadata needs a future recheck.
       unlink(metadata_file)
     }
     
     cat("Updated cache:", water_file, "\n")
   } else {
-    water <- readr::read_csv(
-      water_file,
-      show_col_types = FALSE
-    )
-    
+    water <- readr::read_csv(water_file, show_col_types = FALSE)
     cat("Using cached water data:", water_file, "\n")
   }
   
-  return(water)
+  water
 }
 
 # =============================================================================
-# MAIN DATA LOADING (with caching support)
+# MAIN DATA LOADING
 # =============================================================================
+
 get_wading_bird_data <- function(config, path = ".", cache = TRUE) {
   
   level        <- config$spatial$level
-  fill_missing <- config$spatial$fill_missing %||% TRUE
-  fill_value   <- config$spatial$fill_value   %||% 0
-  min_years    <- config$spatial$min_years_required %||% 10
+  fill_missing <- config$spatial$fill_missing         %||% TRUE
+  fill_value   <- config$spatial$fill_value           %||% 0
+  min_years    <- config$spatial$min_years_required   %||% 10
   
-  # =========================================================================
-  # CACHING
-  # =========================================================================
+  if (!level %in% c("system", "subregion", "colony")) {
+    stop(glue::glue(
+      "Spatial level '{level}' not recognised. ",
+      "Use 'system', 'subregion', or 'colony'."
+    ))
+  }
   
+  # -------------------------------------------------------------------------
+  # CACHE
+  # -------------------------------------------------------------------------
   if (cache) {
-    # Generate cache key based on config
     cache_key <- digest::digest(list(
-      level = level,
-      forecast_totals = config$spatial$forecast_totals %||% FALSE,
-      include_species = config$spatial$include_species %||% "top6",
-      fill_missing = fill_missing,
-      fill_value = fill_value,
-      min_years = min_years,
-      include_regions = config$spatial$include_regions,
-      exclude_regions = config$spatial$exclude_regions,
+      level            = level,
+      forecast_totals  = config$spatial$forecast_totals  %||% FALSE,
+      include_species  = config$spatial$include_species  %||% "top6",
+      fill_missing     = fill_missing,
+      fill_value       = fill_value,
+      min_years        = min_years,
+      include_regions  = config$spatial$include_regions,
+      exclude_regions  = config$spatial$exclude_regions,
       include_colonies = config$spatial$include_colonies,
       exclude_colonies = config$spatial$exclude_colonies
     ))
     
-    cache_file <- file.path("cache", paste0("data_", level, "_", substr(cache_key, 1, 8), ".rds"))
+    cache_file <- file.path(
+      "cache",
+      paste0("data_", level, "_", substr(cache_key, 1L, 8L), ".rds")
+    )
     
-    # Load from cache if available
     if (file.exists(cache_file)) {
-      cache_time <- file.info(cache_file)$mtime
-      cache_age_hours <- as.numeric(difftime(Sys.time(), cache_time, units = "hours"))
-      
-      cat(glue::glue("✓ Loading cached data from: {basename(cache_file)}\n"))
-      cat(glue::glue("  (cached {round(cache_age_hours, 1)} hours ago)\n\n"))
-      
+      age_h <- as.numeric(difftime(Sys.time(),
+                                   file.info(cache_file)$mtime,
+                                   units = "hours"))
+      cat(glue::glue(
+        "✓ Loading cached data: {basename(cache_file)} ",
+        "({round(age_h, 1)} hours old)\n\n"
+      ))
       return(readRDS(cache_file))
     }
   }
   
-  # =========================================================================
-  # LOAD DATA (if not cached)
-  # =========================================================================
-  
-  # Determine species preferences from config
-  species_pref <- config$spatial$include_species %||% "top6"
+  # -------------------------------------------------------------------------
+  # SPECIES FILTER
+  # -------------------------------------------------------------------------
+  species_pref     <- config$spatial$include_species %||% "top6"
   include_unknowns <- config$spatial$include_unknowns %||% FALSE
   
-  # Load raw counts
-  # Translate "system" -> "all" for wader compatibility
   wader_level <- translate_level_for_wader(level)
-  counts <- tibble(max_counts(level = wader_level, path = path))
+  counts      <- tibble::tibble(wader::max_counts(level = wader_level, path = path))
   
-  # Filter species based on config
-  if (length(species_pref) == 1 && species_pref == "top6") {
-    counts <- counts |>
-      filter(species %in% c("gbhe", "greg", "rosp", "sneg", "wost", "whib"))
-    
-  } else if (length(species_pref) == 1 && species_pref == "all") {
-    
-    # 'all' but NO unknowns, filter the generic codes out
+  generic_codes <- c("unkn", "lada", "lawh", "smda", "smhe", "smwh")
+  
+  if (identical(species_pref, "top6") ||
+      (length(species_pref) == 1L && species_pref == "top6")) {
+    counts <- dplyr::filter(
+      counts, species %in% c("gbhe", "greg", "rosp", "sneg", "wost", "whib")
+    )
+  } else if (identical(species_pref, "all") ||
+             (length(species_pref) == 1L && species_pref == "all")) {
     if (!include_unknowns) {
-      generic_codes <- c("unkn", "lada", "lawh", "smda", "smhe", "smwh")
-      counts <- counts |>
-        filter(!species %in% generic_codes)
+      counts <- dplyr::filter(counts, !species %in% generic_codes)
     }
-    # If include_unknowns is TRUE -> keep everything!
-    
   } else {
-    # Assume custom list in the yaml (e.g., ["wost", "anhi", "unkn"])
-    counts <- counts |>
-      filter(species %in% species_pref)
+    counts <- dplyr::filter(counts, species %in% species_pref)
   }
   
-  water <- get_data_water()
+  # -------------------------------------------------------------------------
+  # WATER DATA
+  # Pass remote_url from config if present; otherwise use local cache only.
+  # -------------------------------------------------------------------------
+  water <- get_data_water(
+    remote_url = config$water$remote_url %||% NULL
+  )
   
-  # ==========================================================================
-  # SYSTEM (system-wide)
-  # ==========================================================================
+  # -------------------------------------------------------------------------
+  # SYSTEM
+  # -------------------------------------------------------------------------
   if (level == "system") {
     
     if (fill_missing) {
       counts <- counts |>
-        complete(year = full_seq(year, 1), species,
-                 fill = list(count = fill_value)) |>
-        ungroup()
+        tidyr::complete(
+          year = tidyr::full_seq(year, 1L),
+          species,
+          fill = list(count = fill_value)
+        ) |>
+        dplyr::ungroup()
     }
     
-    water_all <- filter(water, region == "all")
+    water_all <- dplyr::filter(water, region == "all")
     
     cat("\n=== Water Data Summary ===\n")
     cat("  Years:", min(water_all$year), "-", max(water_all$year), "\n")
     cat("  N rows:", nrow(water_all), "\n\n")
     
     combined <- counts |>
-      filter(year >= 1993) |>
-      left_join(water_all, by = "year") |>
-      as_tsibble(key = species, index = year)
+      dplyr::filter(year >= 1993L) |>
+      dplyr::left_join(
+        dplyr::select(water_all, -region),
+        by = "year"
+      ) |>
+      tsibble::as_tsibble(key = species, index = year)
     
-    # ==========================================================================
+    # -------------------------------------------------------------------------
     # SUBREGION
-    # ==========================================================================
+    # -------------------------------------------------------------------------
   } else if (level == "subregion") {
     
-    # Apply subregion exclude filter if specified
-    if (!is.null(config$spatial$exclude_regions) &&
-        length(config$spatial$exclude_regions) > 0) {
-      counts <- counts |>
-        filter(!subregion %in% config$spatial$exclude_regions)
+    # Exclude first, then include (exclude wins if both set).
+    if (length(config$spatial$exclude_regions) > 0L) {
+      counts <- dplyr::filter(
+        counts, !subregion %in% config$spatial$exclude_regions
+      )
+    }
+    if (length(config$spatial$include_regions) > 0L) {
+      counts <- dplyr::filter(
+        counts, subregion %in% config$spatial$include_regions
+      )
     }
     
-    # Apply include/exclude filters
-    if (!is.null(config$spatial$include_regions) &&
-        length(config$spatial$include_regions) > 0) {
-      counts <- counts |>
-        filter(subregion %in% config$spatial$include_regions)
-    }
-    if (!is.null(config$spatial$exclude_regions) &&
-        length(config$spatial$exclude_regions) > 0) {
-      counts <- counts |>
-        filter(!subregion %in% config$spatial$exclude_regions)
-    }
-    
-    # Filter by minimum years per subregion
     counts <- counts |>
-      group_by(subregion) |>
-      filter(n_distinct(year) >= min_years) |>
-      ungroup()
+      dplyr::group_by(subregion) |>
+      dplyr::filter(dplyr::n_distinct(year) >= min_years) |>
+      dplyr::ungroup()
     
-    # Fill missing years
     if (fill_missing) {
       counts <- counts |>
-        complete(year = full_seq(year, 1), subregion, species,
-                 fill = list(count = fill_value)) |>
-        ungroup()
+        tidyr::complete(
+          year = tidyr::full_seq(year, 1L),
+          subregion,
+          species,
+          fill = list(count = fill_value)
+        ) |>
+        dplyr::ungroup()
     }
     
-    # Join water data via subregion
-    water_sub <- filter(water, region %in% unique(counts$subregion))
+    water_sub <- dplyr::filter(water, region %in% unique(counts$subregion))
     
     cat("\n=== Water data by subregion ===\n")
     water_sub |>
-      group_by(region) |>
-      summarise(
+      dplyr::group_by(region) |>
+      dplyr::summarise(
         min_year = min(year),
         max_year = max(year),
-        n_years  = n_distinct(year),
+        n_years  = dplyr::n_distinct(year),
         .groups  = "drop"
       ) |>
       print()
     cat("\n")
     
     combined <- counts |>
-      filter(year >= 1993) |>
-      left_join(water_sub, by = join_by(year, subregion == region)) |>
-      mutate(region = subregion) |>
+      dplyr::filter(year >= 1993L) |>
+      dplyr::left_join(water_sub, by = dplyr::join_by(year, subregion == region)) |>
+      dplyr::mutate(region = subregion) |>
       dplyr::select(-subregion) |>
-      as_tsibble(key = c(species, region), index = year)
+      tsibble::as_tsibble(key = c(species, region), index = year)
     
-    # ==========================================================================
+    # -------------------------------------------------------------------------
     # COLONY
-    # ==========================================================================
-  } else if (level == "colony") {
+    # -------------------------------------------------------------------------
+  } else {   # level == "colony"
     
-    # Apply colony include/exclude filters
-    if (!is.null(config$spatial$include_colonies) &&
-        length(config$spatial$include_colonies) > 0) {
-      counts <- counts |>
-        filter(colony %in% config$spatial$include_colonies)
+    if (length(config$spatial$include_colonies) > 0L) {
+      counts <- dplyr::filter(counts, colony %in% config$spatial$include_colonies)
       cat("Filtering to", length(config$spatial$include_colonies),
           "specified colonies\n")
     }
-    if (!is.null(config$spatial$exclude_colonies) &&
-        length(config$spatial$exclude_colonies) > 0) {
-      counts <- counts |>
-        filter(!colony %in% config$spatial$exclude_colonies)
+    if (length(config$spatial$exclude_colonies) > 0L) {
+      counts <- dplyr::filter(counts, !colony %in% config$spatial$exclude_colonies)
+    }
+    if (length(config$spatial$exclude_regions) > 0L) {
+      counts <- dplyr::filter(
+        counts, !subregion %in% config$spatial$exclude_regions
+      )
+    }
+    if (length(config$spatial$include_regions) > 0L) {
+      counts <- dplyr::filter(
+        counts, subregion %in% config$spatial$include_regions
+      )
     }
     
-    # Apply subregion exclude filter if specified 
-    if (!is.null(config$spatial$exclude_regions) &&
-        length(config$spatial$exclude_regions) > 0) {
-      counts <- counts |>
-        filter(!subregion %in% config$spatial$exclude_regions)
-    }
-    
-    # Apply subregion filter if specified
-    if (!is.null(config$spatial$include_regions) &&
-        length(config$spatial$include_regions) > 0) {
-      counts <- counts |>
-        filter(subregion %in% config$spatial$include_regions)
-    }
-    
-    # Filter by minimum years per colony
     counts <- counts |>
-      group_by(colony) |>
-      filter(n_distinct(year) >= min_years) |>
-      ungroup()
+      dplyr::group_by(colony) |>
+      dplyr::filter(dplyr::n_distinct(year) >= min_years) |>
+      dplyr::ungroup()
     
     cat("Colonies after year filter (>=", min_years, "years):",
-        length(unique(counts$colony)), "\n")
+        dplyr::n_distinct(counts$colony), "\n")
     
-    # Fill missing years per colony (FOR MVGAM)
     if (fill_missing) {
       counts <- counts |>
-        ungroup() |>
-        complete(
-          year = full_seq(year, 1),
+        dplyr::ungroup() |>
+        tidyr::complete(
+          year = tidyr::full_seq(year, 1L),
           tidyr::nesting(colony, subregion),
           species,
           fill = list(count = fill_value)
         )
     }
     
-    # Join water data via subregion (colony inherits from subregion)
-    water_sub <- filter(water, region %in% unique(counts$subregion))
+    water_sub <- dplyr::filter(water, region %in% unique(counts$subregion))
     
     cat("\n=== Water data for colony level (via subregion) ===\n")
     print(table(unique(counts$subregion)))
     cat("\n")
     
     combined <- counts |>
-      filter(year >= 1993) |>
-      left_join(water_sub, by = join_by(year, subregion == region)) |>
-      mutate(region = colony) |>   # colony becomes the spatial key
+      dplyr::filter(year >= 1993L) |>
+      dplyr::left_join(water_sub, by = dplyr::join_by(year, subregion == region)) |>
+      dplyr::mutate(region = colony) |>
       dplyr::select(-subregion, -colony) |>
-      as_tsibble(key = c(species, region), index = year)
-    
-  } else {
-    stop(glue::glue(
-      "Spatial level '{level}' not recognized. ",
-      "Use 'system', 'subregion', or 'colony'."
-    ))
+      tsibble::as_tsibble(key = c(species, region), index = year)
   }
   
-  # ==========================================================================
-  # FINAL DATA QUALITY CHECK
-  # ==========================================================================
+  # -------------------------------------------------------------------------
+  # DATA QUALITY CHECK
+  # -------------------------------------------------------------------------
   cat("\n=== Data Quality Check ===\n")
   
   missing_summary <- combined |>
-    as_tibble() |>
-    summarise(across(where(is.numeric), ~sum(is.na(.)))) |>
-    dplyr::select(where(~. > 0))
+    tibble::as_tibble() |>
+    dplyr::summarise(dplyr::across(where(is.numeric), ~ sum(is.na(.)))) |>
+    dplyr::select(where(~ . > 0L))
   
-  if (ncol(missing_summary) > 0) {
-    cat("⚠️  Columns with missing values:\n")
+  if (ncol(missing_summary) > 0L) {
+    cat("⚠  Columns with missing values:\n")
     print(missing_summary)
   } else {
-    cat("✅ No missing values in numeric columns\n")
+    cat("✓ No missing values in numeric columns\n")
   }
   
-  # ==========================================================================
-  # AGGREGATE TO TOTALS (If configured)
-  # ==========================================================================
-  if (!is.null(config$spatial$forecast_totals) && isTRUE(config$spatial$forecast_totals)) {
+  # -------------------------------------------------------------------------
+  # AGGREGATE TO TOTALS
+  # -------------------------------------------------------------------------
+  if (isTRUE(config$spatial$forecast_totals)) {
     cat("\n=== Aggregating to TOTAL Counts ===\n")
-    cat("Collapsing all species into a single 'Total' category...\n")
     
-    # Drop tsibble class temporarily to do dplyr operations safely
-    combined_df <- as_tibble(combined)
+    combined_df <- tibble::as_tibble(combined)
+    group_cols  <- if ("region" %in% names(combined_df)) c("year", "region") else "year"
+    water_cols  <- setdiff(names(combined_df), c(group_cols, "species", "count"))
     
-    # Determine grouping columns dynamically
-    group_cols <- "year"
-    if ("region" %in% names(combined_df)) group_cols <- c(group_cols, "region")
-    
-    # Identify water covariate columns (everything else)
-    water_cols <- setdiff(names(combined_df), c(group_cols, "species", "count"))
-    
-    # Aggregate
     combined <- combined_df |>
       dplyr::group_by(dplyr::across(dplyr::all_of(group_cols))) |>
       dplyr::summarise(
         count = sum(count, na.rm = TRUE),
-        # Water covariates are identical for a given year/region, so take the first
-        dplyr::across(dplyr::all_of(water_cols), ~ dplyr::first(.x)),
+        dplyr::across(dplyr::all_of(water_cols), dplyr::first),
         .groups = "drop"
       ) |>
       dplyr::mutate(species = "Total")
     
-    # Re-create the tsibble
-    if ("region" %in% names(combined)) {
-      combined <- as_tsibble(combined, key = c(species, region), index = year)
+    combined <- if ("region" %in% names(combined)) {
+      tsibble::as_tsibble(combined, key = c(species, region), index = year)
     } else {
-      combined <- as_tsibble(combined, key = species, index = year)
+      tsibble::as_tsibble(combined, key = species, index = year)
     }
+    
+    cat("Aggregated to", dplyr::n_distinct(combined$species), "series\n")
   }
   
-  # Attach metadata
+  # -------------------------------------------------------------------------
+  # METADATA AND SUMMARY
+  # -------------------------------------------------------------------------
   attr(combined, "spatial_level") <- level
   attr(combined, "spatial_units") <- if (level == "system") {
     "system-wide"
@@ -438,41 +405,35 @@ get_wading_bird_data <- function(config, path = ".", cache = TRUE) {
     unique(combined$region)
   }
   
-  # Summary output
   cat(glue::glue(
-    "\n✅ Loaded data at '{level}' level: {nrow(combined)} observations\n"
+    "\n✓ Loaded '{level}' level data: {nrow(combined)} observations\n"
   ))
   
   if (level != "system") {
     cat(glue::glue(
-      "   Spatial units: {paste(unique(combined$region), collapse = ', ')}\n"
+      "  Spatial units: {paste(unique(combined$region), collapse = ', ')}\n"
     ))
     combined |>
-      as_tibble() |>
-      group_by(region) |>
-      summarise(
+      tibble::as_tibble() |>
+      dplyr::group_by(region) |>
+      dplyr::summarise(
         min_year = min(year),
         max_year = max(year),
-        n_years  = n_distinct(year),
+        n_years  = dplyr::n_distinct(year),
         .groups  = "drop"
       ) |>
       print(n = Inf)
   }
   
-  
-  
-
-  
-  # =========================================================================
-  # SAVE TO CACHE
-  # =========================================================================
-  
+  # -------------------------------------------------------------------------
+  # SAVE CACHE
+  # -------------------------------------------------------------------------
   if (cache) {
     dir.create("cache", showWarnings = FALSE, recursive = TRUE)
     saveRDS(combined, cache_file)
-    cat(glue::glue("\n💾 Data cached to: {basename(cache_file)}\n"))
+    cat(glue::glue("\n💾 Cached to: {basename(cache_file)}\n"))
   }
   
   cat("\n")
-  return(combined)
+  combined
 }

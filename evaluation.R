@@ -36,6 +36,15 @@ library(tidyr)
 library(distributional)
 library(future)
 
+
+
+
+conflicted::conflicts_prefer(base::intersect, .quiet = TRUE)
+conflicted::conflicts_prefer(base::union,     .quiet = TRUE)
+conflicted::conflicts_prefer(base::setdiff,   .quiet = TRUE)
+
+
+
 `%||%` <- function(x, y) if (is.null(x)) y else x
 
 # =============================================================================
